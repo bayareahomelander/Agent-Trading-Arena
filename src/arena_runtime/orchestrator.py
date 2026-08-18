@@ -3,6 +3,7 @@
 R17 is the all-product preflight barrier. R18 launches every due replica
 concurrently after common state is published and keeps decisions sealed.
 R20 copies sealed outbox bytes into immutable staging without parsing them.
+R21 evaluates staged kernel-exposed bytes against book copies only.
 """
 
 from __future__ import annotations
@@ -16,14 +17,27 @@ from datetime import datetime
 from pathlib import Path
 from typing import Final, Mapping, Sequence
 
+from arena_kernel.matching import apply_decision
 from arena_kernel.schema._dump import dump_json
+from arena_kernel.schema._parse import SCHEMA_VERSION
 from arena_kernel.schema.clock import clock_to_dict
-from arena_kernel.schema.market import bar_to_dict, parse_snapshot
+from arena_kernel.schema.decision import parse_decision
+from arena_kernel.schema.errors import SchemaError
+from arena_kernel.schema.events import (
+    LedgerEvent,
+    OrderFilledPayload,
+    make_decision_missing,
+)
+from arena_kernel.schema.fills import FillsFile, PriorFill
+from arena_kernel.schema.market import Snapshot, bar_to_dict, parse_snapshot
+from arena_kernel.schema.portfolio import Portfolio
 from arena_kernel.types import format_et_timestamp
 from arena_kernel.workspace import OUTBOX_DECISION_FILE, SNAPSHOT_FILE
 from arena_runtime.audit import AUDIT_SCHEMA_VERSION, AuditArchive, parse_audit_event
 from arena_runtime.disposition import (
+    REPLICA_TREATMENT_DISQUALIFY_REFUSAL,
     REPLICA_TREATMENT_EVALUATE,
+    REPLICA_TREATMENT_HOLD_NO_ACTION,
     REPLICA_TREATMENT_VOIDED,
     ROUND_TREATMENT_EVALUATE,
     ReplicaDisposition,
@@ -251,6 +265,90 @@ def collect_sealed_decisions(
         staging_root=staging,
         round_treatment=disposition.treatment,
         records=records,
+    )
+
+
+@dataclass(frozen=True)
+class CandidateReplica:
+    """Candidate book, fills, and events for one replica after R21 evaluation."""
+
+    product_id: str
+    replica_id: str
+    round_id: str
+    treatment: str
+    events: tuple[LedgerEvent, ...]
+    portfolio: Portfolio
+    fills: FillsFile
+
+
+@dataclass(frozen=True)
+class CandidateSet:
+    """Candidate evaluation for one closed collection. Not yet published."""
+
+    contract_version: str
+    round_id: str
+    publishable: bool
+    candidates: tuple[CandidateReplica, ...]
+
+    def __post_init__(self) -> None:
+        if self.publishable and not self.candidates:
+            raise OrchestratorError(
+                "candidates",
+                "a publishable set must contain every replica candidate",
+            )
+        if not self.publishable and self.candidates:
+            raise OrchestratorError(
+                "candidates",
+                "an unpublishable set must not retain partial candidates",
+            )
+
+
+def evaluate_candidates(
+    *,
+    collection: SealedCollection,
+    snapshot: Snapshot,
+    books: Mapping[str, Portfolio],
+    fills: Mapping[str, FillsFile] | None = None,
+) -> CandidateSet:
+    """Evaluate staged kernel-exposed decisions against copies of the books."""
+
+    if not isinstance(collection, SealedCollection):
+        raise OrchestratorError("collection", "expected SealedCollection")
+    if not isinstance(snapshot, Snapshot):
+        raise OrchestratorError("snapshot", "expected Snapshot")
+    resolved_books = _require_evaluation_books(collection, books)
+    resolved_fills = _require_evaluation_fills(collection, fills)
+    if collection.round_treatment != ROUND_TREATMENT_EVALUATE:
+        return CandidateSet(
+            contract_version=RUNNER_CONTRACT_VERSION,
+            round_id=collection.round_id,
+            publishable=False,
+            candidates=(),
+        )
+    try:
+        candidates = tuple(
+            _evaluate_one_record(
+                record,
+                snapshot=snapshot,
+                book=resolved_books[record.replica_id],
+                fills=resolved_fills[record.replica_id],
+            )
+            for record in collection.records
+        )
+    except OrchestratorError:
+        raise
+    except Exception:
+        return CandidateSet(
+            contract_version=RUNNER_CONTRACT_VERSION,
+            round_id=collection.round_id,
+            publishable=False,
+            candidates=(),
+        )
+    return CandidateSet(
+        contract_version=RUNNER_CONTRACT_VERSION,
+        round_id=collection.round_id,
+        publishable=True,
+        candidates=candidates,
     )
 
 
@@ -859,3 +957,154 @@ def _is_link_or_junction(path: Path) -> bool:
         return True
     is_junction = getattr(path, "is_junction", None)
     return bool(is_junction()) if callable(is_junction) else False
+
+
+def _require_evaluation_books(
+    collection: SealedCollection,
+    books: object,
+) -> dict[str, Portfolio]:
+    if not isinstance(books, Mapping):
+        raise OrchestratorError("books", "expected a replica-id mapping")
+    resolved: dict[str, Portfolio] = {}
+    for record in collection.records:
+        book = books.get(record.replica_id)
+        if book is None:
+            raise OrchestratorError(
+                "books",
+                f"missing authoritative book for replica {record.replica_id}",
+            )
+        if not isinstance(book, Portfolio):
+            raise OrchestratorError(
+                f"books.{record.replica_id}",
+                "expected Portfolio",
+            )
+        if book.replica_id != record.replica_id:
+            raise OrchestratorError(
+                f"books.{record.replica_id}.replica_id",
+                "must match the sealed collection record",
+            )
+        resolved[record.replica_id] = book
+    return resolved
+
+
+def _require_evaluation_fills(
+    collection: SealedCollection,
+    fills: Mapping[str, FillsFile] | None,
+) -> dict[str, FillsFile]:
+    if fills is None:
+        fills = {}
+    if not isinstance(fills, Mapping):
+        raise OrchestratorError("fills", "expected a replica-id mapping")
+    resolved: dict[str, FillsFile] = {}
+    for record in collection.records:
+        book = fills.get(record.replica_id)
+        if book is None:
+            resolved[record.replica_id] = FillsFile(
+                schema_version=SCHEMA_VERSION,
+                fills=(),
+            )
+            continue
+        if not isinstance(book, FillsFile):
+            raise OrchestratorError(
+                f"fills.{record.replica_id}",
+                "expected FillsFile",
+            )
+        resolved[record.replica_id] = book
+    return resolved
+
+
+def _evaluate_one_record(
+    record: SealedDecisionRecord,
+    *,
+    snapshot: Snapshot,
+    book: Portfolio,
+    fills: FillsFile,
+) -> CandidateReplica:
+    if record.exposed_to_kernel:
+        events, portfolio = _apply_staged_decision(record, snapshot, book)
+    elif record.treatment in {
+        REPLICA_TREATMENT_HOLD_NO_ACTION,
+        REPLICA_TREATMENT_DISQUALIFY_REFUSAL,
+    }:
+        events = (
+            make_decision_missing(
+                replica_id=record.replica_id,
+                round_id=record.round_id,
+                timestamp=snapshot.clock.deadline,
+                reason=record.outcome,
+            ),
+        )
+        portfolio = book
+    else:
+        raise OrchestratorError(
+            f"collection.records.{record.replica_id}.treatment",
+            "evaluate-path records cannot be voided",
+        )
+    return CandidateReplica(
+        product_id=record.product_id,
+        replica_id=record.replica_id,
+        round_id=record.round_id,
+        treatment=record.treatment,
+        events=events,
+        portfolio=portfolio,
+        fills=_extend_candidate_fills(fills, events),
+    )
+
+
+def _apply_staged_decision(
+    record: SealedDecisionRecord,
+    snapshot: Snapshot,
+    book: Portfolio,
+) -> tuple[tuple[LedgerEvent, ...], Portfolio]:
+    field = f"collection.records.{record.replica_id}.staged_path"
+    if record.staged_path is None:
+        raise OrchestratorError(field, "kernel-exposed record is missing staged bytes")
+    try:
+        payload = record.staged_path.read_bytes()
+    except OSError as exc:
+        raise OrchestratorError(field, f"cannot read staged decision: {exc}") from exc
+    checksum = hashlib.sha256(payload).hexdigest()
+    if checksum != record.checksum:
+        raise OrchestratorError(
+            field,
+            "staged checksum does not match the sealed collection record",
+        )
+    try:
+        decision = parse_decision(payload)
+    except SchemaError as exc:
+        return (
+            (
+                make_decision_missing(
+                    replica_id=record.replica_id,
+                    round_id=record.round_id,
+                    timestamp=snapshot.clock.deadline,
+                    reason=exc.path if exc.path != "$" else "invalid_decision",
+                ),
+            ),
+            book,
+        )
+    return apply_decision(book, decision, snapshot)
+
+
+def _extend_candidate_fills(
+    book: FillsFile,
+    events: tuple[LedgerEvent, ...],
+) -> FillsFile:
+    extra: list[PriorFill] = []
+    for event in events:
+        payload = event.payload
+        if not isinstance(payload, OrderFilledPayload) or event.round_id is None:
+            continue
+        extra.append(
+            PriorFill(
+                fill_id=payload.fill_id,
+                round_id=event.round_id,
+                symbol=payload.symbol,
+                side=payload.side,
+                quantity=payload.quantity,
+                fill_price=payload.fill_price,
+                notional_usd=payload.notional_usd,
+                filled_at=event.timestamp,
+            )
+        )
+    return FillsFile(schema_version=book.schema_version, fills=book.fills + tuple(extra))
