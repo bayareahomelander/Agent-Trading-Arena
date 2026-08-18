@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import shutil
+import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,6 +84,9 @@ _UNAVAILABLE_MARKERS: Final[tuple[str, ...]] = (
     "connection refused",
     "connection failed",
 )
+_SESSION_SCHEMA_VERSION: Final[str] = "1"
+_SESSION_LOCKS: dict[Path, threading.Lock] = {}
+_SESSION_LOCKS_GUARD = threading.Lock()
 _DOCUMENTED_REASONING_MODES: Final[frozenset[str]] = frozenset(
     {
         "none",
@@ -125,6 +129,145 @@ class GrokBuildExecutionError(ValueError):
         super().__init__(f"{path}: {message}")
 
 
+class GrokBuildSessionError(ValueError):
+    """Missing, corrupt, ambiguous, or cross-replica Grok Build session state."""
+
+    def __init__(self, path: str, message: str) -> None:
+        self.path = path
+        self.message = message
+        super().__init__(f"{path}: {message}")
+
+
+class GrokBuildSessionStore:
+    """Immutable one-to-one Grok Build session references outside agent workspaces."""
+
+    def __init__(self, root: Path | str) -> None:
+        if not isinstance(root, (Path, str)):
+            raise GrokBuildSessionError("session_store", "expected a path")
+        resolved = Path(root).resolve(strict=False)
+        try:
+            resolved.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise GrokBuildSessionError(
+                "session_store",
+                f"cannot create session store: {exc}",
+            ) from exc
+        if not resolved.is_dir():
+            raise GrokBuildSessionError("session_store", "must be a directory")
+        self._root = resolved
+        with _SESSION_LOCKS_GUARD:
+            self._lock = _SESSION_LOCKS.setdefault(resolved, threading.Lock())
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
+    def record_path(self, product_id: str, replica_id: str) -> Path:
+        _store_segment(product_id, path="product_id")
+        _store_segment(replica_id, path="replica_id")
+        return (self._root / product_id / f"{replica_id}.json").resolve(strict=False)
+
+    def save(
+        self,
+        product_id: str,
+        replica_id: str,
+        session_reference: str,
+    ) -> Path:
+        reference = _session_reference(session_reference)
+        target = self.record_path(product_id, replica_id)
+        payload = {
+            "schema_version": _SESSION_SCHEMA_VERSION,
+            "product_id": product_id,
+            "replica_id": replica_id,
+            "session_reference": reference,
+        }
+        data = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+        with self._lock:
+            for record in self._root.rglob("*.json"):
+                stored = self._load_path(record)
+                if stored["session_reference"] == reference and record != target:
+                    raise GrokBuildSessionError(
+                        "session_reference",
+                        "is already mapped to another product or replica",
+                    )
+            if target.exists():
+                stored = self._load_path(target)
+                if stored != payload:
+                    raise GrokBuildSessionError(
+                        "session_reference",
+                        "replica already has a different stored session",
+                    )
+                return target
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("xb") as stream:
+                    stream.write(data)
+            except FileExistsError:
+                stored = self._load_path(target)
+                if stored != payload:
+                    raise GrokBuildSessionError(
+                        "session_reference",
+                        "replica session was concurrently replaced",
+                    )
+            except OSError as exc:
+                raise GrokBuildSessionError(
+                    "session_store",
+                    f"cannot persist session reference: {exc}",
+                ) from exc
+        return target
+
+    def load(self, product_id: str, replica_id: str) -> str:
+        target = self.record_path(product_id, replica_id)
+        with self._lock:
+            if not target.is_file():
+                raise GrokBuildSessionError(
+                    "session_reference",
+                    "stored session is missing for this replica",
+                )
+            return str(self._load_path(target)["session_reference"])
+
+    def _load_path(self, path: Path) -> dict[str, str]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise GrokBuildSessionError(
+                "session_reference",
+                "stored session record is corrupt",
+            ) from exc
+        required = {
+            "schema_version",
+            "product_id",
+            "replica_id",
+            "session_reference",
+        }
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise GrokBuildSessionError(
+                "session_reference",
+                "stored session record has an invalid shape",
+            )
+        for key in required:
+            if not isinstance(payload[key], str):
+                raise GrokBuildSessionError(
+                    "session_reference",
+                    f"stored session field {key!r} is invalid",
+                )
+        if payload["schema_version"] != _SESSION_SCHEMA_VERSION:
+            raise GrokBuildSessionError(
+                "session_reference",
+                "stored session schema version is unsupported",
+            )
+        _store_segment(payload["product_id"], path="product_id")
+        _store_segment(payload["replica_id"], path="replica_id")
+        _session_reference(payload["session_reference"])
+        expected = self.record_path(payload["product_id"], payload["replica_id"])
+        if expected != path.resolve(strict=False):
+            raise GrokBuildSessionError(
+                "session_reference",
+                "stored session identity does not match its path",
+            )
+        return {key: str(payload[key]) for key in required}
+
+
 @dataclass(frozen=True)
 class GrokBuildPreflightCapabilities:
     """Non-secret Grok Build capability facts proven by preflight."""
@@ -143,7 +286,7 @@ class GrokBuildPreflightCapabilities:
 
 
 class GrokBuildAdapter:
-    """Grok Build adapter: R13 preflight plus R14 fresh-session execution."""
+    """Grok Build adapter: R13 preflight, R14 fresh run, R15 session resume."""
 
     def __init__(
         self,
@@ -151,6 +294,7 @@ class GrokBuildAdapter:
         launch: ReplicaLaunch,
         *,
         archive: AuditArchive,
+        session_store: GrokBuildSessionStore | None = None,
         executable_name: str = "grok",
         executable_prefix: Sequence[str] = (),
     ) -> None:
@@ -163,6 +307,25 @@ class GrokBuildAdapter:
             raise GrokBuildPreflightError("launch", "expected ReplicaLaunch")
         if not isinstance(archive, AuditArchive):
             raise GrokBuildPreflightError("archive", "expected AuditArchive")
+        resolved_session_store = (
+            GrokBuildSessionStore(
+                archive.root.parent / "runtime-state" / "grok-sessions"
+            )
+            if session_store is None
+            else session_store
+        )
+        if not isinstance(resolved_session_store, GrokBuildSessionStore):
+            raise GrokBuildPreflightError(
+                "session_store",
+                "expected GrokBuildSessionStore",
+            )
+        if resolved_session_store.root == launch.workspace or (
+            resolved_session_store.root.is_relative_to(launch.workspace)
+        ):
+            raise GrokBuildPreflightError(
+                "session_store",
+                "must be outside the replica workspace",
+            )
         if registration.provider_id != GROK_BUILD_PROVIDER_ID:
             raise GrokBuildPreflightError(
                 "provider_id",
@@ -200,6 +363,7 @@ class GrokBuildAdapter:
         self._registration = registration
         self._launch = launch
         self._archive = archive
+        self._session_store = resolved_session_store
         self._executable_name = executable_name
         self._executable_prefix = prefix
         self._last_capabilities: GrokBuildPreflightCapabilities | None = None
@@ -449,7 +613,7 @@ class GrokBuildAdapter:
         )
 
     def run(self, request: RunnerRequest) -> RunnerResult:
-        """Execute one fresh Grok Build headless round for a ready replica."""
+        """Execute a fresh or exact stored-session Grok Build round."""
 
         if not isinstance(request, RunnerRequest):
             raise GrokBuildExecutionError("request", "expected RunnerRequest")
@@ -459,11 +623,28 @@ class GrokBuildAdapter:
                 "preflight",
                 "matching ready preflight is required before execution",
             )
-        if request.session_reference is not None:
-            raise GrokBuildExecutionError(
-                "session_reference",
-                "fresh Grok Build execution does not accept a session reference",
+        stored_session: str | None = None
+        if request.session_reference is None:
+            stored_path = self._session_store.record_path(
+                request.product_id,
+                request.replica_id,
             )
+            if stored_path.exists():
+                self._session_store.load(request.product_id, request.replica_id)
+                raise GrokBuildSessionError(
+                    "session_reference",
+                    "stored session exists; an explicit matching reference is required",
+                )
+        else:
+            stored_session = self._session_store.load(
+                request.product_id,
+                request.replica_id,
+            )
+            if request.session_reference != stored_session:
+                raise GrokBuildSessionError(
+                    "session_reference",
+                    "does not match the session stored for this replica",
+                )
         try:
             prompt = request.launch_instruction.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -490,14 +671,23 @@ class GrokBuildAdapter:
             timestamp=launched_at,
             payload={
                 "deadline": request.deadline.isoformat(),
-                "session_reference": None,
+                "session_reference": stored_session,
             },
             artifacts=(),
         )
         try:
             facts = run_isolated_process(
                 self._launch,
-                self._fresh_argv(self._ready_executable, request, prompt),
+                (
+                    self._fresh_argv(self._ready_executable, request, prompt)
+                    if stored_session is None
+                    else self._resume_argv(
+                        self._ready_executable,
+                        request,
+                        stored_session,
+                        prompt,
+                    )
+                ),
                 deadline=request.deadline,
             )
         except ProcessSupervisorError as exc:
@@ -555,6 +745,20 @@ class GrokBuildAdapter:
                 artifact_references=artifact_paths,
             )
 
+        observed_session = _require_one_session_id(facts.stdout)
+        if stored_session is None:
+            self._session_store.save(
+                request.product_id,
+                request.replica_id,
+                observed_session,
+            )
+        elif observed_session != stored_session:
+            raise GrokBuildSessionError(
+                "session_reference",
+                "resumed Grok Build output reported a different session",
+            )
+        result_session = stored_session or observed_session
+
         self._append_preflight_event(
             request,
             event_type="decision_collected",
@@ -576,7 +780,7 @@ class GrokBuildAdapter:
             exit_status=facts.exit_status,
             decision_present=True,
             decision_checksum=decision_checksum,
-            session_reference=None,
+            session_reference=result_session,
             artifact_references=artifact_paths,
         )
         self._append_preflight_event(
@@ -586,17 +790,16 @@ class GrokBuildAdapter:
             payload={
                 "outcome": result.outcome,
                 "exit_status": result.exit_status,
-                "session_reference": None,
+                "session_reference": result_session,
             },
             artifacts=artifacts,
         )
         return result
 
-    def _fresh_argv(
+    def _command_prefix(
         self,
         executable: Path,
         request: RunnerRequest,
-        prompt: str,
     ) -> tuple[str, ...]:
         return (
             str(executable),
@@ -614,6 +817,27 @@ class GrokBuildAdapter:
             "--always-approve",
             "--no-auto-update",
             "--verbatim",
+        )
+
+    def _fresh_argv(
+        self,
+        executable: Path,
+        request: RunnerRequest,
+        prompt: str,
+    ) -> tuple[str, ...]:
+        return (*self._command_prefix(executable, request), "--single", prompt)
+
+    def _resume_argv(
+        self,
+        executable: Path,
+        request: RunnerRequest,
+        session_reference: str,
+        prompt: str,
+    ) -> tuple[str, ...]:
+        return (
+            *self._command_prefix(executable, request),
+            "--resume",
+            session_reference,
             "--single",
             prompt,
         )
@@ -945,3 +1169,63 @@ def _boolean_value(value: object) -> bool | None:
 def _safe_segment(value: str, *, path: str) -> None:
     if value in {".", ".."} or "/" in value or "\\" in value:
         raise GrokBuildPreflightError(path, "must be one safe path segment")
+
+
+def _session_reference(value: object) -> str:
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise GrokBuildSessionError(
+            "session_reference",
+            "must be a non-empty opaque string without padding",
+        )
+    if "\x00" in value:
+        raise GrokBuildSessionError("session_reference", "must not contain NUL")
+    return value
+
+
+def _store_segment(value: str, *, path: str) -> None:
+    try:
+        _safe_segment(value, path=path)
+    except GrokBuildPreflightError as exc:
+        raise GrokBuildSessionError(exc.path, exc.message) from exc
+
+
+def _require_one_session_id(value: bytes) -> str:
+    collected = _collect_session_ids(value)
+    if collected is None:
+        raise GrokBuildSessionError(
+            "session_reference",
+            "Grok Build output was not valid JSON or JSONL",
+        )
+    if len(collected) != 1:
+        raise GrokBuildSessionError(
+            "session_reference",
+            "completed Grok Build output must contain exactly one sessionId",
+        )
+    return collected[0]
+
+
+def _collect_session_ids(value: bytes) -> tuple[str, ...] | None:
+    events: list[Mapping[str, Any]] = []
+    for raw_line in value.splitlines():
+        if not raw_line.strip():
+            continue
+        try:
+            event = json.loads(raw_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(event, dict):
+            return None
+        events.append(event)
+    end_ids: list[str] = []
+    for event in events:
+        if event.get("type") == "end":
+            session_id = event.get("sessionId")
+            if isinstance(session_id, str) and session_id and session_id.strip() == session_id:
+                end_ids.append(session_id)
+    if end_ids:
+        return tuple(end_ids)
+    if len(events) == 1:
+        session_id = events[0].get("sessionId")
+        if isinstance(session_id, str) and session_id and session_id.strip() == session_id:
+            return (session_id,)
+    return ()

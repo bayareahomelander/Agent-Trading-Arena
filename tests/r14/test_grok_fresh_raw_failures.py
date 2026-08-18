@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from arena_runtime.adapters.grok_build import GrokBuildExecutionError
+from arena_runtime.adapters.grok_build import (
+    GrokBuildExecutionError,
+    GrokBuildSessionError,
+)
 
 from .conftest import make_case
 
@@ -80,7 +83,7 @@ def test_resume_reference_is_rejected_before_launch(tmp_path: Path) -> None:
     assert adapter.preflight(request).ready
     resumed = replace(request, session_reference="existing-session")
 
-    with pytest.raises(GrokBuildExecutionError) as exc:
+    with pytest.raises(GrokBuildSessionError) as exc:
         adapter.run(resumed)
 
     assert exc.value.path == "session_reference"

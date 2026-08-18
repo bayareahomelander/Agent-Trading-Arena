@@ -48,7 +48,7 @@ def test_fresh_headless_uses_frozen_argv_cwd_and_prompt_bytes(tmp_path: Path) ->
     assert "--continue" not in capture["argv"]
     assert "--session-id" not in capture["argv"]
     assert result.outcome == "completed"
-    assert result.session_reference is None
+    assert result.session_reference == "fresh-grok-session"
 
 
 def test_exact_outbox_bytes_are_hashed_but_never_parsed_or_rewritten(

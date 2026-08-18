@@ -48,6 +48,8 @@ from arena_runtime.adapters.grok_build import (
     GrokBuildExecutionError,
     GrokBuildPreflightCapabilities,
     GrokBuildPreflightError,
+    GrokBuildSessionError,
+    GrokBuildSessionStore,
 )
 from arena_runtime.isolation import (
     READ_ONLY_AREAS,
@@ -114,6 +116,8 @@ __all__ = [
     "GrokBuildExecutionError",
     "GrokBuildPreflightCapabilities",
     "GrokBuildPreflightError",
+    "GrokBuildSessionError",
+    "GrokBuildSessionStore",
     "CodexAdapter",
     "CodexExecutionError",
     "CodexOutcomeClassification",

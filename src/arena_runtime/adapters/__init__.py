@@ -27,6 +27,8 @@ from arena_runtime.adapters.grok_build import (
     GrokBuildExecutionError,
     GrokBuildPreflightCapabilities,
     GrokBuildPreflightError,
+    GrokBuildSessionError,
+    GrokBuildSessionStore,
 )
 
 __all__ = [
@@ -52,6 +54,8 @@ __all__ = [
     "GrokBuildExecutionError",
     "GrokBuildPreflightCapabilities",
     "GrokBuildPreflightError",
+    "GrokBuildSessionError",
+    "GrokBuildSessionStore",
     "classify_codex_outcome",
     "FakeRunner",
     "FakeRunnerError",
