@@ -24,6 +24,7 @@ from arena_runtime.adapters.grok_build import (
     GROK_BUILD_PREFLIGHT_FAILURES,
     GROK_BUILD_PROVIDER_ID,
     GrokBuildAdapter,
+    GrokBuildExecutionError,
     GrokBuildPreflightCapabilities,
     GrokBuildPreflightError,
 )
@@ -48,6 +49,7 @@ __all__ = [
     "GROK_BUILD_PREFLIGHT_FAILURES",
     "GROK_BUILD_PROVIDER_ID",
     "GrokBuildAdapter",
+    "GrokBuildExecutionError",
     "GrokBuildPreflightCapabilities",
     "GrokBuildPreflightError",
     "classify_codex_outcome",

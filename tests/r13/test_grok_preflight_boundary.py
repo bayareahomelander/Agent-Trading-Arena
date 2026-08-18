@@ -10,7 +10,6 @@ def test_r13_preflight_surface_remains_available(tmp_path: Path) -> None:
     adapter, _, _, _, _ = make_case(tmp_path)
 
     assert callable(adapter.preflight)
-    assert not hasattr(adapter, "run")
 
 
 def test_grok_adapter_has_no_direct_network_or_subprocess_edge() -> None:

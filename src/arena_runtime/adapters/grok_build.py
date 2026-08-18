@@ -1,12 +1,12 @@
-"""xAI Grok Build subscription-backed adapter preflight.
+"""xAI Grok Build subscription-backed adapter.
 
-R13 implements readiness checks only. It invokes documented Grok Build
-diagnostic/help commands through R7/R8, archives sanitized evidence through
-R5, and never reads credential caches directly or starts an agent task.
+R13 proves readiness. R14 runs one fresh headless replica session. Resume and
+provider-failure classification remain later slices.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -21,10 +21,19 @@ from arena_runtime.audit import (
     ProviderArtifactReference,
     parse_audit_event,
 )
-from arena_runtime.isolation import ReplicaLaunch, run_isolated_process
+from arena_runtime.isolation import (
+    ReplicaLaunch,
+    resolve_replica_path,
+    run_isolated_process,
+)
 from arena_runtime.process import ProcessFacts, ProcessSupervisorError
 from arena_runtime.registration import RuntimeRegistration
-from arena_runtime.runner import RUNNER_CONTRACT_VERSION, PreflightResult, RunnerRequest
+from arena_runtime.runner import (
+    RUNNER_CONTRACT_VERSION,
+    PreflightResult,
+    RunnerRequest,
+    RunnerResult,
+)
 
 GROK_BUILD_PROVIDER_ID: Final[str] = "xai"
 GROK_BUILD_ADAPTER_ID: Final[str] = "grok_build"
@@ -96,6 +105,26 @@ class GrokBuildPreflightError(ValueError):
         super().__init__(f"{path}: {message}")
 
 
+class GrokBuildExecutionError(ValueError):
+    """Raw fresh-run failure whose provider meaning remains deferred to R16."""
+
+    def __init__(
+        self,
+        path: str,
+        message: str,
+        *,
+        facts: ProcessFacts | None = None,
+        decision_checksum: str | None = None,
+        artifact_references: tuple[str, ...] = (),
+    ) -> None:
+        self.path = path
+        self.message = message
+        self.facts = facts
+        self.decision_checksum = decision_checksum
+        self.artifact_references = artifact_references
+        super().__init__(f"{path}: {message}")
+
+
 @dataclass(frozen=True)
 class GrokBuildPreflightCapabilities:
     """Non-secret Grok Build capability facts proven by preflight."""
@@ -114,7 +143,7 @@ class GrokBuildPreflightCapabilities:
 
 
 class GrokBuildAdapter:
-    """R13 Grok Build adapter surface: preflight only; run arrives in R14."""
+    """Grok Build adapter: R13 preflight plus R14 fresh-session execution."""
 
     def __init__(
         self,
@@ -174,6 +203,8 @@ class GrokBuildAdapter:
         self._executable_name = executable_name
         self._executable_prefix = prefix
         self._last_capabilities: GrokBuildPreflightCapabilities | None = None
+        self._ready_executable: Path | None = None
+        self._ready_identity: tuple[str, str, str] | None = None
 
     @property
     def last_capabilities(self) -> GrokBuildPreflightCapabilities | None:
@@ -198,6 +229,8 @@ class GrokBuildAdapter:
         )
         artifacts: list[ProviderArtifactReference] = []
         self._last_capabilities = None
+        self._ready_executable = None
+        self._ready_identity = None
 
         request_failure = self._request_failure(request)
         if request_failure is not None:
@@ -400,6 +433,12 @@ class GrokBuildAdapter:
             session_resume=True,
         )
         self._last_capabilities = capabilities
+        self._ready_executable = executable
+        self._ready_identity = (
+            request.product_id,
+            request.replica_id,
+            request.round_id,
+        )
         return self._finish(
             request,
             started_at=started_at,
@@ -407,6 +446,176 @@ class GrokBuildAdapter:
             failure_reason=None,
             capabilities=capabilities,
             artifacts=artifacts,
+        )
+
+    def run(self, request: RunnerRequest) -> RunnerResult:
+        """Execute one fresh Grok Build headless round for a ready replica."""
+
+        if not isinstance(request, RunnerRequest):
+            raise GrokBuildExecutionError("request", "expected RunnerRequest")
+        identity = (request.product_id, request.replica_id, request.round_id)
+        if self._ready_executable is None or self._ready_identity != identity:
+            raise GrokBuildExecutionError(
+                "preflight",
+                "matching ready preflight is required before execution",
+            )
+        if request.session_reference is not None:
+            raise GrokBuildExecutionError(
+                "session_reference",
+                "fresh Grok Build execution does not accept a session reference",
+            )
+        try:
+            prompt = request.launch_instruction.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise GrokBuildExecutionError(
+                "launch_instruction",
+                "must be valid UTF-8 for Grok Build CLI transport",
+            ) from exc
+
+        decision_path = resolve_replica_path(
+            self._launch,
+            "outbox/decision.json",
+            writable=True,
+        )
+        if decision_path.exists():
+            raise GrokBuildExecutionError(
+                "workspace.outbox.decision",
+                "must be absent before a fresh round",
+            )
+
+        launched_at = datetime.now(timezone.utc)
+        self._append_preflight_event(
+            request,
+            event_type="replica_launched",
+            timestamp=launched_at,
+            payload={
+                "deadline": request.deadline.isoformat(),
+                "session_reference": None,
+            },
+            artifacts=(),
+        )
+        try:
+            facts = run_isolated_process(
+                self._launch,
+                self._fresh_argv(self._ready_executable, request, prompt),
+                deadline=request.deadline,
+            )
+        except ProcessSupervisorError as exc:
+            raise GrokBuildExecutionError(
+                getattr(exc, "path", "process"),
+                getattr(exc, "message", str(exc)),
+            ) from exc
+
+        artifacts = (
+            self._archive.write_provider_artifact(
+                self._run_artifact_path(request, "stdout.jsonl"),
+                facts.stdout,
+            ),
+            self._archive.write_provider_artifact(
+                self._run_artifact_path(request, "stderr.log"),
+                facts.stderr,
+            ),
+        )
+        artifact_paths = tuple(item.path for item in artifacts)
+        collected_path = resolve_replica_path(
+            self._launch,
+            "outbox/decision.json",
+            writable=True,
+        )
+        decision_bytes = (
+            collected_path.read_bytes() if collected_path.is_file() else None
+        )
+        decision_checksum = (
+            hashlib.sha256(decision_bytes).hexdigest()
+            if decision_bytes is not None
+            else None
+        )
+        if facts.timed_out:
+            raise GrokBuildExecutionError(
+                "deadline",
+                "Grok Build process tree was terminated at the shared deadline",
+                facts=facts,
+                decision_checksum=decision_checksum,
+                artifact_references=artifact_paths,
+            )
+        if facts.exit_status != 0:
+            raise GrokBuildExecutionError(
+                "exit_status",
+                "Grok Build fresh run exited unsuccessfully",
+                facts=facts,
+                decision_checksum=decision_checksum,
+                artifact_references=artifact_paths,
+            )
+        if decision_bytes is None:
+            raise GrokBuildExecutionError(
+                "decision",
+                "Grok Build fresh run did not write outbox/decision.json",
+                facts=facts,
+                decision_checksum=None,
+                artifact_references=artifact_paths,
+            )
+
+        self._append_preflight_event(
+            request,
+            event_type="decision_collected",
+            timestamp=facts.finished_at,
+            payload={
+                "decision_present": True,
+                "decision_checksum": decision_checksum,
+            },
+            artifacts=(),
+        )
+        result = RunnerResult(
+            contract_version=RUNNER_CONTRACT_VERSION,
+            product_id=request.product_id,
+            replica_id=request.replica_id,
+            round_id=request.round_id,
+            outcome="completed",
+            started_at=facts.started_at,
+            finished_at=facts.finished_at,
+            exit_status=facts.exit_status,
+            decision_present=True,
+            decision_checksum=decision_checksum,
+            session_reference=None,
+            artifact_references=artifact_paths,
+        )
+        self._append_preflight_event(
+            request,
+            event_type="replica_completed",
+            timestamp=facts.finished_at,
+            payload={
+                "outcome": result.outcome,
+                "exit_status": result.exit_status,
+                "session_reference": None,
+            },
+            artifacts=artifacts,
+        )
+        return result
+
+    def _fresh_argv(
+        self,
+        executable: Path,
+        request: RunnerRequest,
+        prompt: str,
+    ) -> tuple[str, ...]:
+        return (
+            str(executable),
+            *self._executable_prefix,
+            "--cwd",
+            str(request.workspace),
+            "--model",
+            self._registration.exact_model,
+            "--reasoning-effort",
+            self._registration.reasoning_mode,
+            "--output-format",
+            "streaming-json",
+            "--sandbox",
+            "workspace",
+            "--always-approve",
+            "--no-auto-update",
+            "--verbatim",
+            "--single",
+            prompt,
         )
 
     def _request_failure(self, request: RunnerRequest) -> str | None:
@@ -545,6 +754,8 @@ class GrokBuildAdapter:
         finished_at = datetime.now(timezone.utc)
         if not ready:
             self._last_capabilities = None
+            self._ready_executable = None
+            self._ready_identity = None
         result = PreflightResult(
             contract_version=RUNNER_CONTRACT_VERSION,
             product_id=request.product_id,
@@ -598,6 +809,12 @@ class GrokBuildAdapter:
         return (
             f"provider/{request.round_id}/{request.product_id}/"
             f"{request.replica_id}/grok-preflight-{name}"
+        )
+
+    def _run_artifact_path(self, request: RunnerRequest, name: str) -> str:
+        return (
+            f"provider/{request.round_id}/{request.product_id}/"
+            f"{request.replica_id}/grok-run-{name}"
         )
 
 
