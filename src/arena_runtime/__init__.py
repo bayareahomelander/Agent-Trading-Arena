@@ -22,6 +22,17 @@ from arena_runtime.audit import (
     validate_audit_environment,
 )
 from arena_runtime.adapters.fake import FakeRunner, FakeRunnerError, FakeRunnerScript
+from arena_runtime.isolation import (
+    READ_ONLY_AREAS,
+    REPLICAS_DIRECTORY,
+    WRITABLE_AREAS,
+    IsolationError,
+    ReplicaLaunch,
+    enforce_workspace_permissions,
+    prepare_replica_launch,
+    resolve_replica_path,
+    run_isolated_process,
+)
 from arena_runtime.module_map import CONCEPT_OWNERS, RUNTIME_MODULES
 from arena_runtime.process import (
     DEFAULT_STREAM_LIMIT,
@@ -65,6 +76,7 @@ __all__ = [
     "FakeRunner",
     "FakeRunnerError",
     "FakeRunnerScript",
+    "IsolationError",
     "PreflightResult",
     "ProcessFacts",
     "ProcessSupervisorError",
@@ -72,6 +84,9 @@ __all__ = [
     "RUNNER_CONTRACT_VERSION",
     "RUNNER_OUTCOMES",
     "RUNTIME_MODULES",
+    "READ_ONLY_AREAS",
+    "REPLICAS_DIRECTORY",
+    "ReplicaLaunch",
     "RuntimeCapabilities",
     "RuntimeRegistration",
     "Runner",
@@ -80,14 +95,19 @@ __all__ = [
     "RunnerResult",
     "STABLE_TERMS",
     "SUBSCRIPTION_AUTHENTICATION",
+    "WRITABLE_AREAS",
     "audit_event_to_dict",
     "dump_audit_event",
     "dump_runtime_registration",
+    "enforce_workspace_permissions",
     "parse_audit_event",
     "parse_runtime_registration",
+    "prepare_replica_launch",
     "redact_provider_bytes",
     "require_matching_identity",
+    "resolve_replica_path",
     "runtime_registration_to_dict",
     "run_process",
+    "run_isolated_process",
     "validate_audit_environment",
 ]
