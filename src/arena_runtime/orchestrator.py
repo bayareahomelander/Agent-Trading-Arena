@@ -5,19 +5,23 @@ concurrently after common state is published and keeps decisions sealed.
 R20 copies sealed outbox bytes into immutable staging without parsing them.
 R21 evaluates staged kernel-exposed bytes against book copies only.
 R22 publishes a complete candidate set atomically or publishes none.
+R23 marks published books to official closes or defers without guessing.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Final, Mapping, Sequence
 
+from arena_kernel.ledger import MissingCloseError, final_nlv, mark_to_close
 from arena_kernel.matching import apply_decision
 from arena_kernel.schema._dump import dump_json
 from arena_kernel.schema._parse import SCHEMA_VERSION
@@ -32,7 +36,7 @@ from arena_kernel.schema.events import (
 )
 from arena_kernel.schema.fills import FillsFile, PriorFill, dump_fills
 from arena_kernel.schema.market import Snapshot, bar_to_dict, parse_snapshot
-from arena_kernel.schema.portfolio import Portfolio, dump_portfolio
+from arena_kernel.schema.portfolio import Portfolio, dump_portfolio, parse_portfolio
 from arena_kernel.types import format_et_timestamp
 from arena_kernel.workspace import OUTBOX_DECISION_FILE, SNAPSHOT_FILE
 from arena_runtime.audit import AUDIT_SCHEMA_VERSION, AuditArchive, parse_audit_event
@@ -448,6 +452,96 @@ def reconstruct_published_round(
             "events": (replica_dir / AUTHORITATIVE_EVENTS).read_text(encoding="utf-8"),
         }
     return reconstructed
+
+
+CLOSE_MARKED: Final[str] = "marked"
+CLOSE_DEFERRED: Final[str] = "deferred"
+CLOSE_DIRECTORY: Final[str] = ".close"
+
+
+@dataclass(frozen=True)
+class ReplicaCloseMark:
+    """D12 mark and NLV for one published book."""
+
+    replica_id: str
+    equity: Decimal
+    nlv: Decimal
+    events: tuple[LedgerEvent, ...]
+
+
+@dataclass(frozen=True)
+class CloseResult:
+    """Official-close outcome for every requested published book."""
+
+    session_date: date
+    status: str
+    reason: str | None
+    marks: tuple[ReplicaCloseMark, ...]
+
+
+def mark_official_close(
+    *,
+    books_root: Path,
+    vendor: object,
+    session_date: date,
+    replica_ids: Sequence[str],
+    marked_at: datetime,
+) -> CloseResult:
+    """Mark published books to official closes, or defer without guessing."""
+
+    if type(session_date) is not date:
+        raise OrchestratorError("session_date", "expected a datetime.date")
+    if marked_at.tzinfo is None:
+        raise OrchestratorError("marked_at", "must be timezone-aware")
+    if not replica_ids:
+        raise OrchestratorError("replica_ids", "must contain at least one replica")
+    if not callable(getattr(vendor, "official_closes", None)):
+        raise OrchestratorError("vendor", "expected a Vendor with official_closes")
+    root = _require_books_root(books_root, create=False)
+    books = tuple(
+        _load_published_portfolio(root, replica_id) for replica_id in replica_ids
+    )
+    try:
+        closes = vendor.official_closes(session_date)
+    except Exception as exc:
+        path = getattr(exc, "path", None)
+        if path is None:
+            raise
+        return _write_close_result(
+            root,
+            session_date,
+            CloseResult(
+                session_date=session_date,
+                status=CLOSE_DEFERRED,
+                reason=f"{COMMON_DATA_UNAVAILABLE_REASON}:{path}",
+                marks=(),
+            ),
+        )
+    try:
+        marks = tuple(
+            _mark_one_book(book, closes, marked_at=marked_at) for book in books
+        )
+    except MissingCloseError as exc:
+        return _write_close_result(
+            root,
+            session_date,
+            CloseResult(
+                session_date=session_date,
+                status=CLOSE_DEFERRED,
+                reason=f"missing_close:{exc.symbol}",
+                marks=(),
+            ),
+        )
+    return _write_close_result(
+        root,
+        session_date,
+        CloseResult(
+            session_date=session_date,
+            status=CLOSE_MARKED,
+            reason=None,
+            marks=marks,
+        ),
+    )
 
 
 def published_snapshot_checksum(workspace: Path) -> str:
@@ -1315,3 +1409,61 @@ def _append_commit_event(
         }
     )
     archive.append_event(event)
+
+
+def _load_published_portfolio(books_root: Path, replica_id: str) -> Portfolio:
+    path = books_root / replica_id / AUTHORITATIVE_PORTFOLIO
+    if not path.is_file():
+        raise OrchestratorError(
+            f"books_root.{replica_id}",
+            "published portfolio is missing",
+        )
+    try:
+        return parse_portfolio(path.read_text(encoding="utf-8"))
+    except SchemaError as exc:
+        raise OrchestratorError(
+            f"books_root.{replica_id}",
+            f"published portfolio is invalid: {exc}",
+        ) from exc
+
+
+def _mark_one_book(
+    book: Portfolio,
+    closes: Mapping[str, Decimal],
+    *,
+    marked_at: datetime,
+) -> ReplicaCloseMark:
+    equity, mark_event = mark_to_close(book, closes, timestamp=marked_at)
+    nlv, nlv_event = final_nlv(book, closes, timestamp=marked_at)
+    return ReplicaCloseMark(
+        replica_id=book.replica_id,
+        equity=equity,
+        nlv=nlv,
+        events=(mark_event, nlv_event),
+    )
+
+
+def _write_close_result(
+    books_root: Path,
+    session_date: date,
+    result: CloseResult,
+) -> CloseResult:
+    close_dir = books_root / CLOSE_DIRECTORY / session_date.isoformat()
+    close_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "session_date": session_date.isoformat(),
+        "status": result.status,
+        "reason": result.reason,
+        "replica_ids": [item.replica_id for item in result.marks],
+    }
+    (close_dir / "status.json").write_text(dump_json(payload), encoding="utf-8")
+    if result.status == CLOSE_MARKED:
+        for mark in result.marks:
+            replica_dir = close_dir / mark.replica_id
+            replica_dir.mkdir(exist_ok=True)
+            (replica_dir / AUTHORITATIVE_EVENTS).write_text(
+                "".join(dump_ledger_event(event) for event in mark.events),
+                encoding="utf-8",
+                newline="\n",
+            )
+    return result
