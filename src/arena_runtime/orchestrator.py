@@ -4,6 +4,7 @@ R17 is the all-product preflight barrier. R18 launches every due replica
 concurrently after common state is published and keeps decisions sealed.
 R20 copies sealed outbox bytes into immutable staging without parsing them.
 R21 evaluates staged kernel-exposed bytes against book copies only.
+R22 publishes a complete candidate set atomically or publishes none.
 """
 
 from __future__ import annotations
@@ -26,11 +27,12 @@ from arena_kernel.schema.errors import SchemaError
 from arena_kernel.schema.events import (
     LedgerEvent,
     OrderFilledPayload,
+    dump_ledger_event,
     make_decision_missing,
 )
-from arena_kernel.schema.fills import FillsFile, PriorFill
+from arena_kernel.schema.fills import FillsFile, PriorFill, dump_fills
 from arena_kernel.schema.market import Snapshot, bar_to_dict, parse_snapshot
-from arena_kernel.schema.portfolio import Portfolio
+from arena_kernel.schema.portfolio import Portfolio, dump_portfolio
 from arena_kernel.types import format_et_timestamp
 from arena_kernel.workspace import OUTBOX_DECISION_FILE, SNAPSHOT_FILE
 from arena_runtime.audit import AUDIT_SCHEMA_VERSION, AuditArchive, parse_audit_event
@@ -350,6 +352,102 @@ def evaluate_candidates(
         publishable=True,
         candidates=candidates,
     )
+
+
+AUTHORITATIVE_PORTFOLIO = "portfolio.json"
+AUTHORITATIVE_FILLS = "fills.json"
+AUTHORITATIVE_EVENTS = "events.jsonl"
+COMMITTED_DIRECTORY = ".committed"
+STAGING_DIRECTORY = ".staging"
+
+
+@dataclass(frozen=True)
+class PublicationResult:
+    """Outcome of attempting to publish one candidate set."""
+
+    contract_version: str
+    round_id: str
+    committed: bool
+    published_replica_ids: tuple[str, ...]
+    committed_root: Path | None
+
+
+def publish_candidates(
+    *,
+    candidates: CandidateSet,
+    books_root: Path,
+    archive: AuditArchive,
+    published_at: datetime,
+) -> PublicationResult:
+    """Publish every candidate together, or change no authoritative book."""
+
+    if not isinstance(candidates, CandidateSet):
+        raise OrchestratorError("candidates", "expected CandidateSet")
+    if not isinstance(archive, AuditArchive):
+        raise OrchestratorError("archive", "expected AuditArchive")
+    if published_at.tzinfo is None:
+        raise OrchestratorError("published_at", "must be timezone-aware")
+    root = _require_books_root(books_root)
+    if not candidates.publishable:
+        return PublicationResult(
+            contract_version=RUNNER_CONTRACT_VERSION,
+            round_id=candidates.round_id,
+            committed=False,
+            published_replica_ids=(),
+            committed_root=None,
+        )
+    _append_commit_event(
+        archive,
+        event_type="commit_started",
+        round_id=candidates.round_id,
+        timestamp=published_at,
+    )
+    staging = _stage_candidate_set(candidates, root)
+    committed = _finalize_candidate_publication(
+        staging,
+        books_root=root,
+        round_id=candidates.round_id,
+    )
+    _append_commit_event(
+        archive,
+        event_type="commit_completed",
+        round_id=candidates.round_id,
+        timestamp=published_at,
+    )
+    return PublicationResult(
+        contract_version=RUNNER_CONTRACT_VERSION,
+        round_id=candidates.round_id,
+        committed=True,
+        published_replica_ids=tuple(
+            item.replica_id for item in candidates.candidates
+        ),
+        committed_root=committed,
+    )
+
+
+def reconstruct_published_round(
+    books_root: Path,
+    round_id: str,
+) -> dict[str, dict[str, str]]:
+    """Reload committed books and events for one published round."""
+
+    root = _require_books_root(books_root, create=False)
+    committed = (root / COMMITTED_DIRECTORY / round_id).resolve(strict=False)
+    if not committed.is_dir():
+        raise OrchestratorError(
+            "books_root",
+            f"committed archive for {round_id} is missing",
+        )
+    reconstructed: dict[str, dict[str, str]] = {}
+    for replica_dir in sorted(path for path in committed.iterdir() if path.is_dir()):
+        reconstructed[replica_dir.name] = {
+            "portfolio": (replica_dir / AUTHORITATIVE_PORTFOLIO).read_text(
+                encoding="utf-8"
+            ),
+            "fills": (replica_dir / AUTHORITATIVE_FILLS).read_text(encoding="utf-8"),
+            "events": (replica_dir / AUTHORITATIVE_EVENTS).read_text(encoding="utf-8"),
+        }
+    return reconstructed
 
 
 def published_snapshot_checksum(workspace: Path) -> str:
@@ -1108,3 +1206,112 @@ def _extend_candidate_fills(
             )
         )
     return FillsFile(schema_version=book.schema_version, fills=book.fills + tuple(extra))
+
+
+def _require_books_root(value: object, *, create: bool = True) -> Path:
+    if not isinstance(value, (Path, str)):
+        raise OrchestratorError("books_root", "expected a path")
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        raise OrchestratorError("books_root", "must be absolute")
+    resolved = candidate.resolve(strict=False)
+    if resolved != candidate or ".." in candidate.parts:
+        raise OrchestratorError("books_root", "must be resolved")
+    if create:
+        try:
+            resolved.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise OrchestratorError(
+                "books_root",
+                f"cannot create books root: {exc}",
+            ) from exc
+    if not resolved.is_dir():
+        raise OrchestratorError("books_root", "must be an existing directory")
+    return resolved
+
+
+def _stage_candidate_set(candidates: CandidateSet, books_root: Path) -> Path:
+    staging = books_root / STAGING_DIRECTORY / candidates.round_id
+    if staging.exists():
+        raise OrchestratorError("books_root", "publication staging already exists")
+    try:
+        staging.mkdir(parents=True)
+        for candidate in candidates.candidates:
+            replica_dir = staging / candidate.replica_id
+            replica_dir.mkdir()
+            (replica_dir / AUTHORITATIVE_PORTFOLIO).write_text(
+                dump_portfolio(candidate.portfolio),
+                encoding="utf-8",
+                newline="\n",
+            )
+            (replica_dir / AUTHORITATIVE_FILLS).write_text(
+                dump_fills(candidate.fills),
+                encoding="utf-8",
+                newline="\n",
+            )
+            (replica_dir / AUTHORITATIVE_EVENTS).write_text(
+                "".join(dump_ledger_event(event) for event in candidate.events),
+                encoding="utf-8",
+                newline="\n",
+            )
+    except OrchestratorError:
+        raise
+    except OSError as exc:
+        raise OrchestratorError(
+            "books_root",
+            f"cannot stage candidate books: {exc}",
+        ) from exc
+    return staging.resolve()
+
+
+def _finalize_candidate_publication(
+    staging: Path,
+    *,
+    books_root: Path,
+    round_id: str,
+) -> Path:
+    committed = books_root / COMMITTED_DIRECTORY / round_id
+    committed.parent.mkdir(parents=True, exist_ok=True)
+    if committed.exists():
+        raise OrchestratorError("books_root", "round already committed")
+    try:
+        staging.replace(committed)
+    except OSError as exc:
+        raise OrchestratorError(
+            "books_root",
+            f"cannot finalize candidate publication: {exc}",
+        ) from exc
+    for replica_dir in committed.iterdir():
+        if not replica_dir.is_dir():
+            continue
+        live = books_root / replica_dir.name
+        live.mkdir(parents=True, exist_ok=True)
+        for name in (
+            AUTHORITATIVE_PORTFOLIO,
+            AUTHORITATIVE_FILLS,
+            AUTHORITATIVE_EVENTS,
+        ):
+            (live / name).write_bytes((replica_dir / name).read_bytes())
+    return committed.resolve()
+
+
+def _append_commit_event(
+    archive: AuditArchive,
+    *,
+    event_type: str,
+    round_id: str,
+    timestamp: datetime,
+) -> None:
+    event = parse_audit_event(
+        {
+            "schema_version": AUDIT_SCHEMA_VERSION,
+            "type": event_type,
+            "product_id": None,
+            "replica_id": None,
+            "round_id": round_id,
+            "timestamp": format_et_timestamp(timestamp),
+            "payload": {},
+            "provider_artifacts": [],
+        }
+    )
+    archive.append_event(event)
