@@ -1,0 +1,17 @@
+{
+  "round_id": "2026-08-17-morning",
+  "action": "trade",
+  "orders": [
+    {
+      "priority": 1,
+      "symbol": "SPY",
+      "side": "buy",
+      "notional_usd": 500.00
+    }
+  ],
+  "thesis": "Buy SPY with half the cash.",
+  "confidence": 0.60,
+  "risk_note": "SPY can fall.",
+  "invalidation": "Close below 95.",
+  "intended_horizon": "1-5 trading days"
+}

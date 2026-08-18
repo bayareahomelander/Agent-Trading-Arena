@@ -1,0 +1,17 @@
+{
+  "round_id": "2026-08-17-late",
+  "action": "hold",
+  "orders": [
+    {
+      "priority": 1,
+      "symbol": "SPY",
+      "side": "buy",
+      "notional_usd": 250.00
+    }
+  ],
+  "thesis": "Hold that still lists an order.",
+  "confidence": 0.50,
+  "risk_note": "Shape error.",
+  "invalidation": "n/a",
+  "intended_horizon": "n/a"
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": "1",
+  "fills": [
+    {
+      "fill_id": "2026-08-17-morning:1",
+      "round_id": "2026-08-17-morning",
+      "symbol": "SPY",
+      "side": "buy",
+      "quantity": "2.500",
+      "fill_price": "500.0000",
+      "notional_usd": "1250.00",
+      "filled_at": "2026-08-17T10:16:00-04:00"
+    }
+  ]
+}

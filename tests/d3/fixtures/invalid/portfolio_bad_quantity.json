@@ -1,0 +1,13 @@
+{
+  "schema_version": "1",
+  "replica_id": "product-a-1",
+  "product_id": "product-a",
+  "cash": "1000.00",
+  "positions": [
+    {
+      "symbol": "SPY",
+      "quantity": "1.0001",
+      "cost_basis": "500.0000"
+    }
+  ]
+}

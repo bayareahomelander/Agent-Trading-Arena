@@ -1,0 +1,49 @@
+Baseline tape hand calculations (do not edit to match code — fix the code).
+
+Tape: fixtures/golden/tape. Starting cash 1000.00. Universe AAA, SPY.
+First scored window: 2026-08-17-morning (eligible bar for every needed symbol).
+Official close: AAA 10.00, SPY 112.00. Seed: baselines.json random_seed = 20260817.
+
+Fill model (D9/D10): buy_fill = VWAP × 1.0005, then 4 d.p. half even.
+qty = floor(notional / buy_fill) to 0.001. cost = round_cash(qty × fill).
+
+--- cash (baseline:cash) ---
+No orders. Mark = NLV = 1000.00.
+
+--- SPY buy-and-hold (baseline:spy_buy_and_hold) ---
+Morning only, notional = all cash 1000.00. Morning SPY VWAP 100.
+  buy_fill = 100 × 1.0005 = 100.0500
+  qty      = floor(1000 / 100.0500) = floor(9.99500249…) = 9.995
+  cost     = 9.995 × 100.0500 = 999.99975 → 1000.00
+  cash     = 0.00
+Late: not traded.
+  mark = 9.995 × 112 = 1119.44
+  nlv  = 9.995 × (112 × 0.9995) = 9.995 × 111.944 = 1118.88028 → 1118.88
+
+--- equal-weight (baseline:equal_weight) ---
+Split 1000.00 → AAA 500.00, SPY 500.00 (sorted names). Morning only.
+AAA VWAP 10:
+  buy_fill = 10 × 1.0005 = 10.0050
+  qty      = floor(500 / 10.0050) = floor(49.975012…) = 49.975
+  cost     = 49.975 × 10.0050 = 499.999875 → 500.00
+  cash     = 500.00
+SPY VWAP 100:
+  qty      = floor(500 / 100.0500) = 4.997
+  cost     = 4.997 × 100.0500 = 499.94985 → 499.95
+  cash     = 0.05
+Late: no rebalance.
+  mark = 0.05 + 49.975 × 10 + 4.997 × 112
+       = 0.05 + 499.75 + 559.664 = 1059.464 → 1059.46
+  nlv  = 0.05 + 49.975 × (10 × 0.9995) + 4.997 × (112 × 0.9995)
+       = 0.05 + 49.975 × 9.9950 + 4.997 × 111.944
+       = 0.05 + 499.500125 + 559.384168 = 1058.934293 → 1058.93
+
+--- seeded random (baseline:seeded_random) ---
+Random(20260817). Morning: hold (cash 1000.00).
+Late: buy AAA notional 81.39 (RNG cents). Late AAA VWAP 10.
+  buy_fill = 10.0050
+  qty      = floor(81.39 / 10.0050) = floor(8.134932…) = 8.134
+  cost     = 8.134 × 10.0050 = 81.38067 → 81.38
+  cash     = 1000.00 − 81.38 = 918.62
+  mark = 918.62 + 8.134 × 10 = 918.62 + 81.34 = 999.96
+  nlv  = 918.62 + 8.134 × 9.9950 = 918.62 + 81.29933 = 999.91933 → 999.92

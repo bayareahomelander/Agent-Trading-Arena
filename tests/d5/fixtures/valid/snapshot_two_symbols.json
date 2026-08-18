@@ -1,0 +1,40 @@
+{
+  "schema_version": "1",
+  "clock": {
+    "schema_version": "1",
+    "exchange_timestamp": "2026-08-17T10:15:00-04:00",
+    "timezone": "America/New_York",
+    "session_status": "open",
+    "round_id": "2026-08-17-morning",
+    "round_start": "2026-08-17T10:00:00-04:00",
+    "deadline": "2026-08-17T10:15:00-04:00"
+  },
+  "bars": [
+    {
+      "symbol": "AAA",
+      "bar_start": "2026-08-17T10:15:00-04:00",
+      "open": "10.00",
+      "high": "10.20",
+      "low": "9.90",
+      "close": "10.10",
+      "volume": "1000",
+      "vwap": "10.05"
+    },
+    {
+      "symbol": "SPY",
+      "bar_start": "2026-08-17T10:15:00-04:00",
+      "open": "500.00",
+      "high": "501.00",
+      "low": "499.00",
+      "close": "500.50",
+      "volume": "20000"
+    }
+  ],
+  "portfolio": {
+    "schema_version": "1",
+    "replica_id": "product-a-1",
+    "product_id": "product-a",
+    "cash": "1000.00",
+    "positions": []
+  }
+}

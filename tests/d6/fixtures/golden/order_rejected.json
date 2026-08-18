@@ -1,0 +1,13 @@
+{
+  "schema_version": "1",
+  "type": "order_rejected",
+  "replica_id": "product-a-1",
+  "round_id": "2026-08-17-morning",
+  "timestamp": "2026-08-17T10:16:00-04:00",
+  "payload": {
+    "reason": "insufficient_cash",
+    "symbol": "SPY",
+    "side": "buy",
+    "priority": 1
+  }
+}

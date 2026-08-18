@@ -1,0 +1,21 @@
+{
+  "schema_version": "1",
+  "type": "order_filled",
+  "replica_id": "product-a-1",
+  "round_id": "2026-08-17-morning",
+  "timestamp": "2026-08-17T10:16:00-04:00",
+  "payload": {
+    "fill_id": "2026-08-17-morning:1",
+    "symbol": "SPY",
+    "side": "buy",
+    "quantity": "1.000",
+    "notional_usd": "100.05",
+    "reference_source": "vwap",
+    "bar_id": "SPY@2026-08-17T10:15:00-04:00",
+    "bar_start": "2026-08-17T10:15:00-04:00",
+    "raw_fill": "100.0500",
+    "fill_price": "100.0500",
+    "cash_before": "1000.00",
+    "cash_after": "899.95"
+  }
+}

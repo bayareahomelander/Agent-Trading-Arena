@@ -1,0 +1,17 @@
+{
+  "round_id": "2026-08-17-morning",
+  "action": "trade",
+  "orders": [
+    {
+      "priority": 1,
+      "symbol": "SPY",
+      "side": "buy",
+      "quantity": "1.000"
+    }
+  ],
+  "thesis": "Buy with share quantity instead of notional.",
+  "confidence": 0.50,
+  "risk_note": "Shape error.",
+  "invalidation": "n/a",
+  "intended_horizon": "n/a"
+}

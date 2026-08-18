@@ -1,0 +1,9 @@
+{
+  "schema_version": "1",
+  "exchange_timestamp": "2026-08-17T10:00:00",
+  "timezone": "America/New_York",
+  "session_status": "open",
+  "round_id": "2026-08-17-morning",
+  "round_start": "2026-08-17T10:00:00-04:00",
+  "deadline": "2026-08-17T10:15:00-04:00"
+}

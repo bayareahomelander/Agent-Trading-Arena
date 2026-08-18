@@ -1,0 +1,7 @@
+{
+  "schema_version": "1",
+  "replica_id": "template",
+  "product_id": "product-a",
+  "cash": "1000.00",
+  "positions": []
+}

@@ -1,0 +1,10 @@
+{
+  "round_id": "2026-08-17-late",
+  "action": "hold",
+  "orders": [],
+  "thesis": "No sufficiently attractive risk-reward opportunity.",
+  "confidence": 0.70,
+  "risk_note": "Cash may underperform a rising market.",
+  "invalidation": "A material change in price or public information.",
+  "intended_horizon": "Until the next round"
+}

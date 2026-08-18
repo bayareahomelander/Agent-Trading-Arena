@@ -1,0 +1,10 @@
+{
+  "round_id": "2026-08-17-late",
+  "action": "hold",
+  "orders": [],
+  "thesis": "Still no trade.",
+  "confidence": 0.70,
+  "risk_note": "Cash may lag.",
+  "invalidation": "A clear setup appears.",
+  "intended_horizon": "Until the close"
+}

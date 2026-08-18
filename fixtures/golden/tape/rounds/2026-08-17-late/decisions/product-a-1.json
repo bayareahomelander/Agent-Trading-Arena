@@ -1,0 +1,10 @@
+{
+  "round_id": "2026-08-17-late",
+  "action": "hold",
+  "orders": [],
+  "thesis": "Hold the morning SPY position.",
+  "confidence": 0.55,
+  "risk_note": "Overnight gap.",
+  "invalidation": "A thesis break at the close.",
+  "intended_horizon": "Until the close"
+}

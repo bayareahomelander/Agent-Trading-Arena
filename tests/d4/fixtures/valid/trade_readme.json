@@ -1,0 +1,17 @@
+{
+  "round_id": "2026-08-17-morning",
+  "action": "trade",
+  "orders": [
+    {
+      "priority": 1,
+      "symbol": "SPY",
+      "side": "buy",
+      "notional_usd": 250.00
+    }
+  ],
+  "thesis": "Short ex-ante explanation of the decision.",
+  "confidence": 0.62,
+  "risk_note": "What could make this decision lose money.",
+  "invalidation": "Observable condition that would invalidate the thesis.",
+  "intended_horizon": "3-10 trading days"
+}

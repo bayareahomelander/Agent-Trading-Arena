@@ -1,0 +1,25 @@
+Golden tape hand calculations (do not edit to match code — fix the code).
+
+Starting cash: 1000.00 each replica.
+Symbols: AAA, SPY.
+
+Morning SPY VWAP = 100
+  buy_fill  = 100 × 1.0005 = 100.0500
+  replica product-a-1 buys notional 500.00
+  qty       = floor(500 / 100.0500) = floor(4.997501249…) = 4.997
+  cost      = 4.997 × 100.0500 = 499.94985 → 499.95
+  cash      = 1000.00 − 499.95 = 500.05
+  basis     = 100.0500
+
+Morning product-a-2: hold. Cash 1000.00.
+
+Late: both hold. Books unchanged.
+
+Official close SPY = 112, AAA = 10 (unused).
+  product-a-1 mark = 500.05 + 4.997 × 112 = 500.05 + 559.664 = 1059.714 → 1059.71
+  product-a-1 NLV  = 500.05 + 4.997 × (112 × 0.9995)
+                   = 500.05 + 4.997 × 111.944
+                   = 500.05 + 559.384168 = 1059.434168 → 1059.43
+  product-a-2 mark = NLV = 1000.00
+
+median_nlv([1059.43, 1000.00]) = (1000.00 + 1059.43) / 2 = 1029.715 → 1029.72

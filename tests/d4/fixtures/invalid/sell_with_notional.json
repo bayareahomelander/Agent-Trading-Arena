@@ -1,0 +1,17 @@
+{
+  "round_id": "2026-08-17-morning",
+  "action": "trade",
+  "orders": [
+    {
+      "priority": 1,
+      "symbol": "SPY",
+      "side": "sell",
+      "notional_usd": 250.00
+    }
+  ],
+  "thesis": "Sell with notional instead of quantity.",
+  "confidence": 0.50,
+  "risk_note": "Shape error.",
+  "invalidation": "n/a",
+  "intended_horizon": "n/a"
+}

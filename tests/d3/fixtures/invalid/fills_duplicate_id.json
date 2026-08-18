@@ -1,0 +1,25 @@
+{
+  "schema_version": "1",
+  "fills": [
+    {
+      "fill_id": "dup",
+      "round_id": "2026-08-17-morning",
+      "symbol": "SPY",
+      "side": "buy",
+      "quantity": "1.000",
+      "fill_price": "100.0000",
+      "notional_usd": "100.00",
+      "filled_at": "2026-08-17T10:16:00-04:00"
+    },
+    {
+      "fill_id": "dup",
+      "round_id": "2026-08-17-morning",
+      "symbol": "AAA",
+      "side": "buy",
+      "quantity": "1.000",
+      "fill_price": "10.0000",
+      "notional_usd": "10.00",
+      "filled_at": "2026-08-17T10:16:00-04:00"
+    }
+  ]
+}

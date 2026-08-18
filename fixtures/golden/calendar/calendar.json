@@ -1,0 +1,19 @@
+{
+  "schema_version": "1",
+  "entries": [
+    {
+      "date": "2026-11-02",
+      "kind": "regular",
+      "scheduled_close": "16:00"
+    },
+    {
+      "date": "2026-11-03",
+      "kind": "early_close",
+      "scheduled_close": "13:00"
+    },
+    {
+      "date": "2026-11-04",
+      "kind": "holiday"
+    }
+  ]
+}

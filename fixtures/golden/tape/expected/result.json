@@ -1,0 +1,124 @@
+{
+  "replicas": {
+    "product-a-1": {
+      "events": [
+        {
+          "schema_version": "1",
+          "type": "decision_accepted",
+          "replica_id": "product-a-1",
+          "round_id": "2026-08-17-morning",
+          "timestamp": "2026-08-17T10:15:00-04:00",
+          "payload": {
+            "action": "trade",
+            "order_count": 1
+          }
+        },
+        {
+          "schema_version": "1",
+          "type": "order_filled",
+          "replica_id": "product-a-1",
+          "round_id": "2026-08-17-morning",
+          "timestamp": "2026-08-17T10:15:00-04:00",
+          "payload": {
+            "fill_id": "2026-08-17-morning:1",
+            "symbol": "SPY",
+            "side": "buy",
+            "quantity": "4.997",
+            "notional_usd": "499.95",
+            "reference_source": "vwap",
+            "bar_id": "SPY@2026-08-17T10:16:00-04:00",
+            "bar_start": "2026-08-17T10:16:00-04:00",
+            "raw_fill": "100.050000",
+            "fill_price": "100.0500",
+            "cash_before": "1000.00",
+            "cash_after": "500.05"
+          }
+        },
+        {
+          "schema_version": "1",
+          "type": "decision_accepted",
+          "replica_id": "product-a-1",
+          "round_id": "2026-08-17-late",
+          "timestamp": "2026-08-17T15:45:00-04:00",
+          "payload": {
+            "action": "hold",
+            "order_count": 0
+          }
+        },
+        {
+          "schema_version": "1",
+          "type": "marked_to_close",
+          "replica_id": "product-a-1",
+          "round_id": null,
+          "timestamp": "2026-08-17T16:00:00-04:00",
+          "payload": {
+            "equity": "1059.71",
+            "cash": "500.05"
+          }
+        },
+        {
+          "schema_version": "1",
+          "type": "final_nlv",
+          "replica_id": "product-a-1",
+          "round_id": null,
+          "timestamp": "2026-08-17T16:00:00-04:00",
+          "payload": {
+            "nlv": "1059.43"
+          }
+        }
+      ],
+      "equity": "1059.71",
+      "nlv": "1059.43"
+    },
+    "product-a-2": {
+      "events": [
+        {
+          "schema_version": "1",
+          "type": "decision_accepted",
+          "replica_id": "product-a-2",
+          "round_id": "2026-08-17-morning",
+          "timestamp": "2026-08-17T10:15:00-04:00",
+          "payload": {
+            "action": "hold",
+            "order_count": 0
+          }
+        },
+        {
+          "schema_version": "1",
+          "type": "decision_accepted",
+          "replica_id": "product-a-2",
+          "round_id": "2026-08-17-late",
+          "timestamp": "2026-08-17T15:45:00-04:00",
+          "payload": {
+            "action": "hold",
+            "order_count": 0
+          }
+        },
+        {
+          "schema_version": "1",
+          "type": "marked_to_close",
+          "replica_id": "product-a-2",
+          "round_id": null,
+          "timestamp": "2026-08-17T16:00:00-04:00",
+          "payload": {
+            "equity": "1000.00",
+            "cash": "1000.00"
+          }
+        },
+        {
+          "schema_version": "1",
+          "type": "final_nlv",
+          "replica_id": "product-a-2",
+          "round_id": null,
+          "timestamp": "2026-08-17T16:00:00-04:00",
+          "payload": {
+            "nlv": "1000.00"
+          }
+        }
+      ],
+      "equity": "1000.00",
+      "nlv": "1000.00"
+    }
+  },
+  "median_nlv": "1029.72"
+}

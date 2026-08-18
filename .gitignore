@@ -1,0 +1,8 @@
+# Local reference notes. Not part of the protocol or the implementation.
+local_foundation/
+
+# Bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
