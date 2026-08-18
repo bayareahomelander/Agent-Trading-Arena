@@ -22,6 +22,15 @@ from arena_runtime.audit import (
     validate_audit_environment,
 )
 from arena_runtime.adapters.fake import FakeRunner, FakeRunnerError, FakeRunnerScript
+from arena_runtime.adapters.codex import (
+    CODEX_ADAPTER_ID,
+    CODEX_DOCUMENTATION_URLS,
+    CODEX_PREFLIGHT_FAILURES,
+    CODEX_PROVIDER_ID,
+    CodexAdapter,
+    CodexPreflightCapabilities,
+    CodexPreflightError,
+)
 from arena_runtime.isolation import (
     READ_ONLY_AREAS,
     REPLICAS_DIRECTORY,
@@ -70,8 +79,15 @@ __all__ = [
     "AuditArchive",
     "AuditArchiveError",
     "AuditEvent",
+    "CODEX_ADAPTER_ID",
+    "CODEX_DOCUMENTATION_URLS",
+    "CODEX_PREFLIGHT_FAILURES",
+    "CODEX_PROVIDER_ID",
     "CAPABILITY_NAMES",
     "CONCEPT_OWNERS",
+    "CodexAdapter",
+    "CodexPreflightCapabilities",
+    "CodexPreflightError",
     "DEFAULT_STREAM_LIMIT",
     "FakeRunner",
     "FakeRunnerError",
