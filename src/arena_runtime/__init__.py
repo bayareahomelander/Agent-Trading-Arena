@@ -39,6 +39,15 @@ from arena_runtime.adapters.codex import (
     CodexSessionStore,
     classify_codex_outcome,
 )
+from arena_runtime.adapters.grok_build import (
+    GROK_BUILD_ADAPTER_ID,
+    GROK_BUILD_DOCUMENTATION_URLS,
+    GROK_BUILD_PREFLIGHT_FAILURES,
+    GROK_BUILD_PROVIDER_ID,
+    GrokBuildAdapter,
+    GrokBuildPreflightCapabilities,
+    GrokBuildPreflightError,
+)
 from arena_runtime.isolation import (
     READ_ONLY_AREAS,
     REPLICAS_DIRECTORY,
@@ -96,6 +105,13 @@ __all__ = [
     "CODEX_REFUSAL_CODES",
     "CAPABILITY_NAMES",
     "CONCEPT_OWNERS",
+    "GROK_BUILD_ADAPTER_ID",
+    "GROK_BUILD_DOCUMENTATION_URLS",
+    "GROK_BUILD_PREFLIGHT_FAILURES",
+    "GROK_BUILD_PROVIDER_ID",
+    "GrokBuildAdapter",
+    "GrokBuildPreflightCapabilities",
+    "GrokBuildPreflightError",
     "CodexAdapter",
     "CodexExecutionError",
     "CodexOutcomeClassification",

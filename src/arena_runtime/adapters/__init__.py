@@ -18,6 +18,15 @@ from arena_runtime.adapters.codex import (
     classify_codex_outcome,
 )
 from arena_runtime.adapters.fake import FakeRunner, FakeRunnerError, FakeRunnerScript
+from arena_runtime.adapters.grok_build import (
+    GROK_BUILD_ADAPTER_ID,
+    GROK_BUILD_DOCUMENTATION_URLS,
+    GROK_BUILD_PREFLIGHT_FAILURES,
+    GROK_BUILD_PROVIDER_ID,
+    GrokBuildAdapter,
+    GrokBuildPreflightCapabilities,
+    GrokBuildPreflightError,
+)
 
 __all__ = [
     "CODEX_ADAPTER_ID",
@@ -34,6 +43,13 @@ __all__ = [
     "CodexPreflightError",
     "CodexSessionError",
     "CodexSessionStore",
+    "GROK_BUILD_ADAPTER_ID",
+    "GROK_BUILD_DOCUMENTATION_URLS",
+    "GROK_BUILD_PREFLIGHT_FAILURES",
+    "GROK_BUILD_PROVIDER_ID",
+    "GrokBuildAdapter",
+    "GrokBuildPreflightCapabilities",
+    "GrokBuildPreflightError",
     "classify_codex_outcome",
     "FakeRunner",
     "FakeRunnerError",
