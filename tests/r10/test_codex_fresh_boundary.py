@@ -1,0 +1,31 @@
+"""R10: fresh execution adds transport, not resume or failure semantics."""
+
+import inspect
+from pathlib import Path
+
+from arena_runtime.adapters.codex import CodexAdapter
+from arena_runtime.runner import Runner
+
+from .conftest import make_case
+
+
+def test_codex_adapter_now_satisfies_shared_runner_protocol(tmp_path: Path) -> None:
+    adapter, _, _, _, _ = make_case(tmp_path)
+
+    assert isinstance(adapter, Runner)
+
+
+def test_run_method_contains_no_provider_failure_mapping() -> None:
+    source = inspect.getsource(CodexAdapter.run)
+
+    assert "quota_exhausted" not in source
+    assert "provider_unavailable" not in source
+    assert "refusal" not in source
+    assert "missing_decision" not in source
+
+
+def test_run_source_does_not_parse_decision_json() -> None:
+    source = inspect.getsource(CodexAdapter.run)
+
+    assert "parse_decision" not in source
+    assert "json.loads" not in source

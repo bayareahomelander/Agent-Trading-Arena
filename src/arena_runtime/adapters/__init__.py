@@ -6,6 +6,7 @@ from arena_runtime.adapters.codex import (
     CODEX_PREFLIGHT_FAILURES,
     CODEX_PROVIDER_ID,
     CodexAdapter,
+    CodexExecutionError,
     CodexPreflightCapabilities,
     CodexPreflightError,
 )
@@ -17,6 +18,7 @@ __all__ = [
     "CODEX_PREFLIGHT_FAILURES",
     "CODEX_PROVIDER_ID",
     "CodexAdapter",
+    "CodexExecutionError",
     "CodexPreflightCapabilities",
     "CodexPreflightError",
     "FakeRunner",

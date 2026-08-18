@@ -28,6 +28,7 @@ from arena_runtime.adapters.codex import (
     CODEX_PREFLIGHT_FAILURES,
     CODEX_PROVIDER_ID,
     CodexAdapter,
+    CodexExecutionError,
     CodexPreflightCapabilities,
     CodexPreflightError,
 )
@@ -86,6 +87,7 @@ __all__ = [
     "CAPABILITY_NAMES",
     "CONCEPT_OWNERS",
     "CodexAdapter",
+    "CodexExecutionError",
     "CodexPreflightCapabilities",
     "CodexPreflightError",
     "DEFAULT_STREAM_LIMIT",

@@ -3,16 +3,13 @@
 import ast
 from pathlib import Path
 
-from arena_runtime.runner import Runner
-
 from .conftest import make_case
 
 
-def test_r9_adapter_is_preflight_only(tmp_path: Path) -> None:
+def test_r9_preflight_surface_remains_available(tmp_path: Path) -> None:
     adapter, _, _, _, _ = make_case(tmp_path)
 
-    assert not isinstance(adapter, Runner)
-    assert not hasattr(adapter, "run")
+    assert callable(adapter.preflight)
 
 
 def test_codex_adapter_has_no_direct_network_or_subprocess_edge() -> None:

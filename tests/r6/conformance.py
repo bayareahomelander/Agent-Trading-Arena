@@ -1,7 +1,8 @@
 """Reusable provider-neutral runner conformance suite.
 
-Future adapter test doubles subclass ``RunnerConformanceSuite`` and implement
-``build_case`` without changing these shared assertions.
+Adapters with only successful execution implemented subclass
+``SuccessfulRunnerConformanceSuite``. Fully normalized test doubles subclass
+``RunnerConformanceSuite`` for all outcomes.
 """
 
 from __future__ import annotations
@@ -18,8 +19,8 @@ from arena_runtime.runner import (
 )
 
 
-class RunnerConformanceSuite:
-    """Shared behavioral gate for any deterministic adapter test double."""
+class SuccessfulRunnerConformanceSuite:
+    """Shared success-path gate for any adapter test double."""
 
     __test__ = False
 
@@ -45,6 +46,26 @@ class RunnerConformanceSuite:
             "completed"
         )
 
+    def test_scripted_decision_bytes_are_not_rewritten(self, tmp_path: Path) -> None:
+        exact = b" \x00not-json\r\n"
+        runner, request = self.build_case(
+            tmp_path,
+            outcome="completed",
+            decision_bytes=exact,
+        )
+
+        assert runner.preflight(request).ready
+        result = runner.run(request)
+
+        assert result.decision_present is True
+        assert (request.workspace / "outbox" / "decision.json").read_bytes() == exact
+
+
+class RunnerConformanceSuite(SuccessfulRunnerConformanceSuite):
+    """Full normalized-outcome gate for deterministic adapter test doubles."""
+
+    __test__ = False
+
     @pytest.mark.parametrize("outcome", RUNNER_OUTCOMES)
     def test_every_normalized_outcome_is_preserved(
         self,
@@ -62,16 +83,3 @@ class RunnerConformanceSuite:
 
         assert result.outcome == outcome
         assert result.decision_present is (decision is not None)
-
-    def test_scripted_decision_bytes_are_not_rewritten(self, tmp_path: Path) -> None:
-        exact = b" \x00not-json\r\n"
-        runner, request = self.build_case(
-            tmp_path,
-            outcome="completed",
-            decision_bytes=exact,
-        )
-
-        result = runner.run(request)
-
-        assert result.decision_present is True
-        assert (request.workspace / "outbox" / "decision.json").read_bytes() == exact
