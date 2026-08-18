@@ -53,6 +53,7 @@ def make_case(
     prompt_bytes: bytes = FROZEN_PROMPT,
     run_exit: int = 0,
     run_sleep_seconds: float = 0,
+    deadline_seconds: float = 20,
 ) -> tuple[CodexAdapter, RunnerRequest, AuditArchive, Path, Path]:
     season = root / "season"
     workspace = season / "replicas" / "codex-product-1"
@@ -160,7 +161,7 @@ def make_case(
         model_reference=EXPECTED_MODEL,
         configuration_reference="registration:codex",
         launch_instruction=prompt_bytes,
-        deadline=datetime.now(timezone.utc) + timedelta(seconds=20),
+        deadline=datetime.now(timezone.utc) + timedelta(seconds=deadline_seconds),
         session_reference=None,
     )
     return adapter, request, archive, run_capture, command_log

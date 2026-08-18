@@ -100,7 +100,7 @@ def test_mismatched_request_session_is_rejected(tmp_path: Path) -> None:
     assert _run_invocations(workspace) == []
 
 
-@pytest.mark.parametrize("mode", ["missing", "duplicate", "invalid-json"])
+@pytest.mark.parametrize("mode", ["missing", "duplicate"])
 def test_invalid_fresh_thread_event_is_not_persisted(
     tmp_path: Path,
     mode: str,
@@ -118,6 +118,28 @@ def test_invalid_fresh_thread_event_is_not_persisted(
         adapter.run(fresh)
 
     assert exc.value.path == "session_reference"
+    assert not store.record_path("codex-product", "codex-product-1").exists()
+
+
+def test_invalid_jsonl_becomes_runner_error_without_session_replacement(
+    tmp_path: Path,
+) -> None:
+    adapter, workspace, _, store = _single(
+        tmp_path,
+        thread_event_mode="invalid-json",
+    )
+    fresh = request(
+        workspace,
+        "codex-product-1",
+        round_id="2026-08-17-morning",
+        prompt=MORNING_PROMPT,
+    )
+    adapter.preflight(fresh)
+
+    result = adapter.run(fresh)
+
+    assert result.outcome == "runner_error"
+    assert result.session_reference is None
     assert not store.record_path("codex-product", "codex-product-1").exists()
 
 

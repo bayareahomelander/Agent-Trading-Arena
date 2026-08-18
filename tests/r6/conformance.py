@@ -79,6 +79,7 @@ class RunnerConformanceSuite(SuccessfulRunnerConformanceSuite):
             decision_bytes=decision,
         )
 
+        assert runner.preflight(request).ready
         result = require_matching_identity(request, runner.run(request))
 
         assert result.outcome == outcome

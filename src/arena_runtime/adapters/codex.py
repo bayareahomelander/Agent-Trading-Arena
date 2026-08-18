@@ -78,6 +78,52 @@ _SESSION_SCHEMA_VERSION: Final[str] = "1"
 _SESSION_LOCKS: dict[Path, threading.Lock] = {}
 _SESSION_LOCKS_GUARD = threading.Lock()
 
+CODEX_QUOTA_ERROR_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "quota_exceeded",
+        "rate_limit_reached",
+        "session_budget_exceeded",
+        "usage_limit_exceeded",
+        "workspace_member_credits_depleted",
+        "workspace_member_usage_limit_reached",
+        "workspace_owner_credits_depleted",
+        "workspace_owner_usage_limit_reached",
+    }
+)
+CODEX_PROVIDER_UNAVAILABLE_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "http_connection_failed",
+        "internal_server_error",
+        "provider_unavailable",
+        "response_stream_connection_failed",
+        "response_stream_disconnected",
+        "response_too_many_failed_attempts",
+        "server_overloaded",
+        "service_unavailable",
+    }
+)
+CODEX_REFUSAL_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "cyber_policy",
+        "policy_refusal",
+        "refusal",
+        "task_refused",
+    }
+)
+_ERROR_CODE_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "code",
+        "codex_error_kind",
+        "codexerrorkind",
+        "error_code",
+        "error_type",
+        "errorcode",
+        "errortype",
+        "rate_limit_reached_type",
+        "ratelimitreachedtype",
+    }
+)
+
 
 class CodexPreflightError(ValueError):
     """Invalid Codex adapter setup with a stable field path."""
@@ -266,6 +312,16 @@ class CodexPreflightCapabilities:
     ignores_rules: bool
 
 
+@dataclass(frozen=True)
+class CodexOutcomeClassification:
+    """Normalized lifecycle outcome plus non-secret source-evidence facts."""
+
+    outcome: str
+    event_types: tuple[str, ...]
+    error_codes: tuple[str, ...]
+    jsonl_valid: bool
+
+
 class CodexAdapter:
     """R9 Codex adapter surface: preflight only; run arrives in R10."""
 
@@ -342,6 +398,7 @@ class CodexAdapter:
         self._executable_name = executable_name
         self._executable_prefix = prefix
         self._last_capabilities: CodexPreflightCapabilities | None = None
+        self._last_classification: CodexOutcomeClassification | None = None
         self._ready_executable: Path | None = None
         self._ready_identity: tuple[str, str, str] | None = None
 
@@ -350,6 +407,12 @@ class CodexAdapter:
         """Most recent ready preflight's safe capability facts."""
 
         return self._last_capabilities
+
+    @property
+    def last_classification(self) -> CodexOutcomeClassification | None:
+        """Most recent run's normalized outcome evidence."""
+
+        return self._last_classification
 
     def preflight(self, request: RunnerRequest) -> PreflightResult:
         """Run documented Codex readiness probes without starting a task."""
@@ -368,6 +431,7 @@ class CodexAdapter:
         )
         artifacts: list[ProviderArtifactReference] = []
         self._last_capabilities = None
+        self._last_classification = None
         self._ready_executable = None
         self._ready_identity = None
 
@@ -652,26 +716,48 @@ class CodexAdapter:
         )
 
         artifact_paths = tuple(item.path for item in artifacts)
-        if facts.timed_out or facts.exit_status != 0 or decision_bytes is None:
-            raise CodexExecutionError(
-                "process",
-                "fresh execution requires R12 outcome classification",
-                facts=facts,
-                decision_checksum=decision_checksum,
-                artifact_references=artifact_paths,
-            )
+        classification, events = _classify_codex_outcome(
+            facts,
+            decision_present=decision_bytes is not None,
+        )
+        self._last_classification = classification
 
-        observed_session = _thread_reference(facts.stdout)
-        if stored_session is None:
+        observed_session = _optional_thread_reference(events)
+        if observed_session is None and classification.outcome in {
+            "completed",
+            "missing_decision",
+        }:
+            raise CodexSessionError(
+                "session_reference",
+                "completed Codex JSONL omitted thread.started.thread_id",
+            )
+        if stored_session is None and observed_session is not None:
             self._session_store.save(
                 request.product_id,
                 request.replica_id,
                 observed_session,
             )
-        elif observed_session != stored_session:
+        elif (
+            stored_session is not None
+            and observed_session is not None
+            and observed_session != stored_session
+        ):
             raise CodexSessionError(
                 "session_reference",
                 "resumed Codex output reported a different thread",
+            )
+        result_session = stored_session or observed_session
+
+        if classification.outcome == "timeout":
+            self._append_preflight_event(
+                request,
+                event_type="replica_terminated",
+                timestamp=facts.finished_at,
+                payload={
+                    "reason": "deadline",
+                    "exit_status": facts.exit_status,
+                },
+                artifacts=(),
             )
 
         result = RunnerResult(
@@ -679,13 +765,13 @@ class CodexAdapter:
             product_id=request.product_id,
             replica_id=request.replica_id,
             round_id=request.round_id,
-            outcome="completed",
+            outcome=classification.outcome,
             started_at=facts.started_at,
             finished_at=facts.finished_at,
             exit_status=facts.exit_status,
-            decision_present=True,
+            decision_present=decision_bytes is not None,
             decision_checksum=decision_checksum,
-            session_reference=observed_session,
+            session_reference=result_session,
             artifact_references=artifact_paths,
         )
         self._append_preflight_event(
@@ -695,7 +781,7 @@ class CodexAdapter:
             payload={
                 "outcome": result.outcome,
                 "exit_status": result.exit_status,
-                "session_reference": observed_session,
+                "session_reference": result_session,
             },
             artifacts=artifacts,
         )
@@ -998,37 +1084,138 @@ def _parse_doctor(value: bytes) -> Mapping[str, Any] | None:
     return parsed
 
 
-def _thread_reference(value: bytes) -> str:
-    references: list[str] = []
+def classify_codex_outcome(
+    facts: ProcessFacts,
+    *,
+    decision_present: bool,
+) -> CodexOutcomeClassification:
+    """Map explicit Codex JSONL/raw facts to exactly one frozen R2 outcome."""
+
+    classification, _ = _classify_codex_outcome(
+        facts,
+        decision_present=decision_present,
+    )
+    return classification
+
+
+def _classify_codex_outcome(
+    facts: ProcessFacts,
+    *,
+    decision_present: bool,
+) -> tuple[CodexOutcomeClassification, tuple[Mapping[str, Any], ...]]:
+    events = _parse_codex_jsonl(facts.stdout)
+    if events is None:
+        return (
+            CodexOutcomeClassification("runner_error", (), (), False),
+            (),
+        )
+    event_types = tuple(str(event["type"]) for event in events)
+    error_codes: set[str] = set()
+    for event in events:
+        event_type = str(event["type"])
+        if event_type in {"error", "turn.failed"}:
+            _collect_error_codes(event, error_codes)
+        if event_type == "item.completed":
+            item = event.get("item")
+            if isinstance(item, Mapping):
+                status = _normalize_code(item.get("status"))
+                if status in {"declined", "refused"}:
+                    error_codes.add("refusal")
+
+    classes: set[str] = set()
+    if error_codes & CODEX_QUOTA_ERROR_CODES:
+        classes.add("quota_exhausted")
+    if error_codes & CODEX_PROVIDER_UNAVAILABLE_CODES:
+        classes.add("provider_unavailable")
+    if error_codes & CODEX_REFUSAL_CODES:
+        classes.add("refusal")
+    known_codes = (
+        CODEX_QUOTA_ERROR_CODES
+        | CODEX_PROVIDER_UNAVAILABLE_CODES
+        | CODEX_REFUSAL_CODES
+    )
+    unknown_codes = error_codes - known_codes
+
+    if len(classes) != 1 or unknown_codes:
+        if classes or error_codes:
+            outcome = "runner_error"
+        elif facts.timed_out:
+            outcome = "timeout"
+        elif (
+            facts.exit_status == 0
+            and "turn.completed" in event_types
+            and not any(kind in {"error", "turn.failed"} for kind in event_types)
+        ):
+            outcome = "completed" if decision_present else "missing_decision"
+        else:
+            outcome = "runner_error"
+    else:
+        outcome = next(iter(classes))
+
+    return (
+        CodexOutcomeClassification(
+            outcome=outcome,
+            event_types=event_types,
+            error_codes=tuple(sorted(error_codes)),
+            jsonl_valid=True,
+        ),
+        events,
+    )
+
+
+def _parse_codex_jsonl(value: bytes) -> tuple[Mapping[str, Any], ...] | None:
+    events: list[Mapping[str, Any]] = []
     for index, raw_line in enumerate(value.splitlines()):
         if not raw_line.strip():
             continue
         try:
             event = json.loads(raw_line.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise CodexSessionError(
-                "session_reference",
-                f"Codex JSONL line {index} is invalid",
-            ) from exc
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
         if not isinstance(event, dict):
-            raise CodexSessionError(
-                "session_reference",
-                f"Codex JSONL line {index} is not an object",
-            )
-        if event.get("type") != "thread.started":
-            continue
-        references.append(_session_reference(event.get("thread_id")))
+            return None
+        event_type = event.get("type")
+        if not isinstance(event_type, str) or not event_type:
+            return None
+        events.append(event)
+    return tuple(events)
+
+
+def _optional_thread_reference(events: Sequence[Mapping[str, Any]]) -> str | None:
+    references = [
+        _session_reference(event.get("thread_id"))
+        for event in events
+        if event.get("type") == "thread.started"
+    ]
     if not references:
-        raise CodexSessionError(
-            "session_reference",
-            "Codex JSONL omitted thread.started.thread_id",
-        )
+        return None
     if len(references) != 1:
         raise CodexSessionError(
             "session_reference",
             "Codex JSONL contained multiple thread references",
         )
     return references[0]
+
+
+def _collect_error_codes(value: object, codes: set[str]) -> None:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            normalized_key = _normalize_code(key)
+            if normalized_key in _ERROR_CODE_KEYS:
+                normalized_value = _normalize_code(child)
+                if normalized_value:
+                    codes.add(normalized_value)
+            _collect_error_codes(child, codes)
+    elif isinstance(value, list):
+        for child in value:
+            _collect_error_codes(child, codes)
+
+
+def _normalize_code(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    with_boundaries = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value.strip())
+    return re.sub(r"[^a-zA-Z0-9]+", "_", with_boundaries).strip("_").casefold()
 
 
 def _check(doctor: Mapping[str, Any], name: str) -> Mapping[str, Any]:
