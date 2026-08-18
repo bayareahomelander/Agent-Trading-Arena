@@ -2,11 +2,13 @@
 
 R17 is the all-product preflight barrier. R18 launches every due replica
 concurrently after common state is published and keeps decisions sealed.
+R20 copies sealed outbox bytes into immutable staging without parsing them.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
@@ -18,8 +20,15 @@ from arena_kernel.schema._dump import dump_json
 from arena_kernel.schema.clock import clock_to_dict
 from arena_kernel.schema.market import bar_to_dict, parse_snapshot
 from arena_kernel.types import format_et_timestamp
-from arena_kernel.workspace import SNAPSHOT_FILE
+from arena_kernel.workspace import OUTBOX_DECISION_FILE, SNAPSHOT_FILE
 from arena_runtime.audit import AUDIT_SCHEMA_VERSION, AuditArchive, parse_audit_event
+from arena_runtime.disposition import (
+    REPLICA_TREATMENT_EVALUATE,
+    REPLICA_TREATMENT_VOIDED,
+    ROUND_TREATMENT_EVALUATE,
+    ReplicaDisposition,
+    RoundDisposition,
+)
 from arena_runtime.registration import RuntimeRegistration
 from arena_runtime.runner import (
     RUNNER_CONTRACT_VERSION,
@@ -64,7 +73,7 @@ _PAUSE_REASON_PRIORITY: Final[tuple[str, ...]] = (
 
 
 class OrchestratorError(ValueError):
-    """Invalid preflight-barrier input with a stable field path."""
+    """Invalid orchestrator input with a stable field path."""
 
     def __init__(self, path: str, message: str) -> None:
         self.path = path
@@ -143,6 +152,106 @@ class DecisionBarrierResult:
         _require_checksum(self.snapshot_checksum)
         if self.deadline.tzinfo is None:
             raise OrchestratorError("deadline", "must be timezone-aware")
+
+
+@dataclass(frozen=True)
+class SealedDecisionRecord:
+    """One replica's staged decision bytes or an explicit missing record."""
+
+    product_id: str
+    replica_id: str
+    round_id: str
+    outcome: str
+    treatment: str
+    decision_present: bool
+    byte_length: int | None
+    checksum: str | None
+    staged_path: Path | None
+    exposed_to_kernel: bool
+
+    def __post_init__(self) -> None:
+        if self.decision_present:
+            if self.byte_length is None or self.byte_length < 0:
+                raise OrchestratorError(
+                    "byte_length",
+                    "required when a decision file is present",
+                )
+            if self.checksum is None or _SHA256.fullmatch(self.checksum) is None:
+                raise OrchestratorError(
+                    "checksum",
+                    "must be a lowercase SHA-256 hex digest when present",
+                )
+            if self.staged_path is None:
+                raise OrchestratorError(
+                    "staged_path",
+                    "required when a decision file is present",
+                )
+        else:
+            if self.byte_length is not None or self.checksum is not None:
+                raise OrchestratorError(
+                    "checksum",
+                    "must be absent when no decision file is staged",
+                )
+            if self.staged_path is not None:
+                raise OrchestratorError(
+                    "staged_path",
+                    "must be absent when no decision file is staged",
+                )
+            if self.exposed_to_kernel:
+                raise OrchestratorError(
+                    "exposed_to_kernel",
+                    "missing records cannot be exposed to the kernel",
+                )
+
+
+@dataclass(frozen=True)
+class SealedCollection:
+    """Immutable staged decisions for one closed decision barrier."""
+
+    contract_version: str
+    round_id: str
+    staging_root: Path
+    round_treatment: str
+    records: tuple[SealedDecisionRecord, ...]
+
+    def kernel_records(self) -> tuple[SealedDecisionRecord, ...]:
+        """Return only the staged decisions the kernel may later evaluate."""
+
+        return tuple(item for item in self.records if item.exposed_to_kernel)
+
+
+def collect_sealed_decisions(
+    *,
+    barrier: DecisionBarrierResult,
+    disposition: RoundDisposition,
+    workspaces: Mapping[str, Path],
+    staging_root: Path,
+) -> SealedCollection:
+    """Copy sealed outbox bytes into staging. Do not parse or apply them."""
+
+    pairs = _align_collection_inputs(barrier, disposition, workspaces)
+    staging = _require_staging_root(
+        staging_root,
+        workspaces=tuple(workspace for _result, _replica, workspace in pairs),
+    )
+    expose_completed = disposition.treatment == ROUND_TREATMENT_EVALUATE
+    records = tuple(
+        _collect_one_decision(
+            result,
+            replica,
+            workspace,
+            staging_root=staging,
+            expose_completed=expose_completed,
+        )
+        for result, replica, workspace in pairs
+    )
+    return SealedCollection(
+        contract_version=RUNNER_CONTRACT_VERSION,
+        round_id=barrier.round_id,
+        staging_root=staging,
+        round_treatment=disposition.treatment,
+        records=records,
+    )
 
 
 def published_snapshot_checksum(workspace: Path) -> str:
@@ -507,3 +616,246 @@ def _require_shared_snapshot(
                 "snapshot_checksum",
                 "published snapshot does not match the shared checksum",
             )
+
+
+def _align_collection_inputs(
+    barrier: object,
+    disposition: object,
+    workspaces: object,
+) -> tuple[tuple[RunnerResult, ReplicaDisposition, Path], ...]:
+    if not isinstance(barrier, DecisionBarrierResult):
+        raise OrchestratorError("barrier", "expected DecisionBarrierResult")
+    if not isinstance(disposition, RoundDisposition):
+        raise OrchestratorError("disposition", "expected RoundDisposition")
+    if not isinstance(workspaces, Mapping):
+        raise OrchestratorError("workspaces", "expected a replica-id mapping")
+    if not barrier.results:
+        raise OrchestratorError("barrier.results", "must contain every sealed result")
+    if len(disposition.replica_dispositions) != len(barrier.results):
+        raise OrchestratorError(
+            "disposition",
+            "must contain one record for every sealed result",
+        )
+    pairs: list[tuple[RunnerResult, ReplicaDisposition, Path]] = []
+    for index, (result, replica) in enumerate(
+        zip(barrier.results, disposition.replica_dispositions, strict=True)
+    ):
+        if (
+            result.product_id,
+            result.replica_id,
+            result.round_id,
+            result.outcome,
+        ) != (
+            replica.product_id,
+            replica.replica_id,
+            replica.round_id,
+            replica.outcome,
+        ):
+            raise OrchestratorError(
+                f"disposition.replica_dispositions.{index}",
+                "must match the sealed barrier result",
+            )
+        if result.round_id != barrier.round_id:
+            raise OrchestratorError(
+                f"barrier.results.{index}.round_id",
+                "must match the barrier round",
+            )
+        workspace = workspaces.get(result.replica_id)
+        if workspace is None:
+            raise OrchestratorError(
+                "workspaces",
+                f"missing workspace for replica {result.replica_id}",
+            )
+        pairs.append(
+            (
+                result,
+                replica,
+                _require_collection_workspace(workspace, result.replica_id),
+            )
+        )
+    return tuple(pairs)
+
+
+def _require_collection_workspace(value: object, replica_id: str) -> Path:
+    path_name = f"workspaces.{replica_id}"
+    if replica_id in {".", ".."} or "/" in replica_id or "\\" in replica_id:
+        raise OrchestratorError(
+            path_name,
+            "replica id must be one direct directory name",
+        )
+    if not isinstance(value, (Path, str)):
+        raise OrchestratorError(path_name, "expected a path")
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        raise OrchestratorError(path_name, "must be absolute")
+    resolved = candidate.resolve(strict=False)
+    if resolved != candidate or ".." in candidate.parts:
+        raise OrchestratorError(path_name, "must be resolved")
+    if _is_link_or_junction(candidate):
+        raise OrchestratorError(path_name, "symlink or junction is prohibited")
+    if not resolved.is_dir():
+        raise OrchestratorError(path_name, "must be an existing directory")
+    return resolved
+
+
+def _require_staging_root(
+    value: object,
+    *,
+    workspaces: Sequence[Path],
+) -> Path:
+    if not isinstance(value, (Path, str)):
+        raise OrchestratorError("staging_root", "expected a path")
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        raise OrchestratorError("staging_root", "must be absolute")
+    resolved = candidate.resolve(strict=False)
+    if resolved != candidate or ".." in candidate.parts:
+        raise OrchestratorError("staging_root", "must be resolved")
+    if _is_link_or_junction(candidate):
+        raise OrchestratorError("staging_root", "symlink or junction is prohibited")
+    for workspace in workspaces:
+        if resolved == workspace or resolved.is_relative_to(workspace):
+            raise OrchestratorError(
+                "staging_root",
+                "must stay outside every replica workspace",
+            )
+    try:
+        resolved.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise OrchestratorError(
+            "staging_root",
+            f"cannot create staging directory: {exc}",
+        ) from exc
+    if not resolved.is_dir() or _is_link_or_junction(resolved):
+        raise OrchestratorError("staging_root", "must be an existing directory")
+    return resolved
+
+
+def _collect_one_decision(
+    result: RunnerResult,
+    replica: ReplicaDisposition,
+    workspace: Path,
+    *,
+    staging_root: Path,
+    expose_completed: bool,
+) -> SealedDecisionRecord:
+    should_stage = replica.treatment == REPLICA_TREATMENT_EVALUATE or (
+        replica.treatment == REPLICA_TREATMENT_VOIDED and result.decision_present
+    )
+    if not should_stage:
+        return SealedDecisionRecord(
+            product_id=result.product_id,
+            replica_id=result.replica_id,
+            round_id=result.round_id,
+            outcome=result.outcome,
+            treatment=replica.treatment,
+            decision_present=False,
+            byte_length=None,
+            checksum=None,
+            staged_path=None,
+            exposed_to_kernel=False,
+        )
+    payload, checksum = _read_sealed_decision(workspace, result)
+    staged_path = _write_staged_decision(
+        staging_root,
+        round_id=result.round_id,
+        replica_id=result.replica_id,
+        payload=payload,
+    )
+    return SealedDecisionRecord(
+        product_id=result.product_id,
+        replica_id=result.replica_id,
+        round_id=result.round_id,
+        outcome=result.outcome,
+        treatment=replica.treatment,
+        decision_present=True,
+        byte_length=len(payload),
+        checksum=checksum,
+        staged_path=staged_path,
+        exposed_to_kernel=(
+            expose_completed and replica.treatment == REPLICA_TREATMENT_EVALUATE
+        ),
+    )
+
+
+def _read_sealed_decision(
+    workspace: Path,
+    result: RunnerResult,
+) -> tuple[bytes, str]:
+    field = f"workspaces.{result.replica_id}.outbox.decision"
+    source = workspace / OUTBOX_DECISION_FILE
+    _reject_link_chain(workspace, source, path=field)
+    if not source.is_file():
+        raise OrchestratorError(field, "sealed decision file is missing")
+    if _is_link_or_junction(source):
+        raise OrchestratorError(field, "symlink or junction is prohibited")
+    try:
+        payload = source.read_bytes()
+    except OSError as exc:
+        raise OrchestratorError(field, f"cannot read sealed decision: {exc}") from exc
+    checksum = hashlib.sha256(payload).hexdigest()
+    if result.decision_checksum != checksum:
+        raise OrchestratorError(
+            field,
+            "staged checksum does not match the sealed runner result",
+        )
+    return payload, checksum
+
+
+def _write_staged_decision(
+    staging_root: Path,
+    *,
+    round_id: str,
+    replica_id: str,
+    payload: bytes,
+) -> Path:
+    destination = staging_root / round_id / replica_id / "decision.json"
+    resolved = destination.resolve(strict=False)
+    if not resolved.is_relative_to(staging_root):
+        raise OrchestratorError(
+            f"workspaces.{replica_id}.outbox.decision",
+            "staged path escapes the staging root",
+        )
+    if resolved.exists():
+        raise OrchestratorError(
+            f"workspaces.{replica_id}.outbox.decision",
+            "staged decision already exists",
+        )
+    try:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        if _is_link_or_junction(resolved.parent) or _is_link_or_junction(
+            resolved.parent.parent
+        ):
+            raise OrchestratorError(
+                f"workspaces.{replica_id}.outbox.decision",
+                "symlink or junction is prohibited",
+            )
+        resolved.write_bytes(payload)
+        os.chmod(resolved, 0o444)
+    except OrchestratorError:
+        raise
+    except OSError as exc:
+        raise OrchestratorError(
+            f"workspaces.{replica_id}.outbox.decision",
+            f"cannot stage sealed decision: {exc}",
+        ) from exc
+    return resolved
+
+
+def _reject_link_chain(root: Path, candidate: Path, *, path: str) -> None:
+    current = root
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as exc:
+        raise OrchestratorError(path, "must stay within the replica workspace") from exc
+    for part in relative.parts:
+        current = current / part
+        if current.exists() and _is_link_or_junction(current):
+            raise OrchestratorError(path, "symlink or junction is prohibited")
+
+
+def _is_link_or_junction(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction()) if callable(is_junction) else False
