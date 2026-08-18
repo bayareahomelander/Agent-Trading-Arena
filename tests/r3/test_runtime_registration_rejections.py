@@ -7,7 +7,7 @@ import pytest
 from arena_kernel.schema.errors import SchemaError
 from arena_runtime.registration import parse_runtime_registration
 
-from conftest import valid_registration
+from .conftest import valid_registration
 
 
 Mutation = Callable[[dict[str, Any]], None]

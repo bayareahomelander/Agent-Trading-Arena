@@ -13,7 +13,7 @@ from arena_runtime.runner import (
     require_matching_identity,
 )
 
-from conftest import make_preflight, make_request, make_result
+from .conftest import make_preflight, make_request, make_result
 
 
 class InMemoryRunner:

@@ -8,7 +8,7 @@ import pytest
 
 from arena_runtime.runner import RunnerContractError
 
-from conftest import make_request
+from .conftest import make_request
 
 
 def test_valid_runner_request_is_frozen_and_preserves_instruction_bytes(

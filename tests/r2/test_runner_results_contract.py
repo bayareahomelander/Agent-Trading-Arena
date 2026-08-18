@@ -6,7 +6,7 @@ import pytest
 
 from arena_runtime.runner import RUNNER_OUTCOMES, RunnerContractError
 
-from conftest import DECISION_CHECKSUM, FINISHED_AT, make_preflight, make_result
+from .conftest import DECISION_CHECKSUM, FINISHED_AT, make_preflight, make_result
 
 
 def test_normalized_outcomes_are_complete_and_exact() -> None:

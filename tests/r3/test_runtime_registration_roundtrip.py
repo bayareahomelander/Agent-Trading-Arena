@@ -14,7 +14,7 @@ from arena_runtime.registration import (
     runtime_registration_to_dict,
 )
 
-from conftest import valid_registration
+from .conftest import valid_registration
 
 
 def test_registration_parses_every_frozen_runtime_field() -> None:
