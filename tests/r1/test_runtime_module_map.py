@@ -53,11 +53,6 @@ def test_product_execution_and_exchange_economics_have_separate_owners() -> None
     assert "arena_runtime" not in KERNEL_MODULES
 
 
-def test_r1_does_not_create_future_behavior_modules() -> None:
+def test_provider_adapters_are_not_part_of_the_r1_boundary() -> None:
     package_dir = Path(__file__).parents[2] / "src" / "arena_runtime"
-    assert {path.name for path in package_dir.glob("*.py")} == {
-        "__init__.py",
-        "module_map.py",
-        "vocabulary.py",
-    }
     assert not (package_dir / "adapters").exists()

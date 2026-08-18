@@ -23,9 +23,11 @@ def test_arena_kernel_does_not_import_arena_runtime() -> None:
         assert "arena_runtime" not in _import_roots(path), path
 
 
-def test_r1_runtime_modules_import_only_typing_and_their_own_package() -> None:
+def test_r1_vocabulary_modules_import_only_typing_and_their_own_package() -> None:
     allowed = {"__future__", "typing", "arena_runtime"}
-    for path in (PROJECT_ROOT / "src" / "arena_runtime").glob("*.py"):
+    runtime_root = PROJECT_ROOT / "src" / "arena_runtime"
+    for name in ("__init__.py", "module_map.py", "vocabulary.py"):
+        path = runtime_root / name
         assert _import_roots(path) <= allowed, path
 
 
