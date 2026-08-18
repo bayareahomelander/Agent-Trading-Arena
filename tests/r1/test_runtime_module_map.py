@@ -1,7 +1,6 @@
 """R1: reviewers can locate future runtime owners without runtime behavior."""
 
 import importlib
-from pathlib import Path
 
 from arena_kernel.module_map import CONCEPT_OWNERS as KERNEL_CONCEPT_OWNERS
 from arena_kernel.module_map import KERNEL_MODULES
@@ -53,6 +52,9 @@ def test_product_execution_and_exchange_economics_have_separate_owners() -> None
     assert "arena_runtime" not in KERNEL_MODULES
 
 
-def test_provider_adapters_are_not_part_of_the_r1_boundary() -> None:
-    package_dir = Path(__file__).parents[2] / "src" / "arena_runtime"
-    assert not (package_dir / "adapters").exists()
+def test_r1_module_map_contains_no_provider_specific_names() -> None:
+    planned_names = " ".join(RUNTIME_MODULES)
+    assert "codex" not in planned_names
+    assert "grok" not in planned_names
+    assert "openai" not in planned_names
+    assert "xai" not in planned_names

@@ -21,6 +21,7 @@ from arena_runtime.audit import (
     redact_provider_bytes,
     validate_audit_environment,
 )
+from arena_runtime.adapters.fake import FakeRunner, FakeRunnerError, FakeRunnerScript
 from arena_runtime.module_map import CONCEPT_OWNERS, RUNTIME_MODULES
 from arena_runtime.registration import (
     CAPABILITY_NAMES,
@@ -54,6 +55,9 @@ __all__ = [
     "AuditEvent",
     "CAPABILITY_NAMES",
     "CONCEPT_OWNERS",
+    "FakeRunner",
+    "FakeRunnerError",
+    "FakeRunnerScript",
     "PreflightResult",
     "ProviderArtifactReference",
     "RUNNER_CONTRACT_VERSION",
