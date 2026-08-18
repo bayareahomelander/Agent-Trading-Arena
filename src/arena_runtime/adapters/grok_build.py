@@ -87,6 +87,32 @@ _UNAVAILABLE_MARKERS: Final[tuple[str, ...]] = (
 _SESSION_SCHEMA_VERSION: Final[str] = "1"
 _SESSION_LOCKS: dict[Path, threading.Lock] = {}
 _SESSION_LOCKS_GUARD = threading.Lock()
+GROK_BUILD_QUOTA_ERROR_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "usage_limit_reached",
+        "usage_pool_exhausted",
+    }
+)
+GROK_BUILD_PROVIDER_UNAVAILABLE_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "network_error",
+        "server_error",
+        "service_unavailable",
+    }
+)
+GROK_BUILD_REFUSAL_CODES: Final[frozenset[str]] = frozenset({"refusal"})
+_ERROR_CODE_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "code",
+        "error",
+        "error_code",
+        "error_type",
+        "errorcode",
+        "errortype",
+        "kind",
+    }
+)
+_SUCCESS_STOP_REASONS: Final[frozenset[str]] = frozenset({"end_turn"})
 _DOCUMENTED_REASONING_MODES: Final[frozenset[str]] = frozenset(
     {
         "none",
@@ -285,6 +311,16 @@ class GrokBuildPreflightCapabilities:
     session_resume: bool
 
 
+@dataclass(frozen=True)
+class GrokBuildOutcomeClassification:
+    """Normalized lifecycle outcome plus non-secret source-evidence facts."""
+
+    outcome: str
+    event_types: tuple[str, ...]
+    error_codes: tuple[str, ...]
+    jsonl_valid: bool
+
+
 class GrokBuildAdapter:
     """Grok Build adapter: R13 preflight, R14 fresh run, R15 session resume."""
 
@@ -367,6 +403,7 @@ class GrokBuildAdapter:
         self._executable_name = executable_name
         self._executable_prefix = prefix
         self._last_capabilities: GrokBuildPreflightCapabilities | None = None
+        self._last_classification: GrokBuildOutcomeClassification | None = None
         self._ready_executable: Path | None = None
         self._ready_identity: tuple[str, str, str] | None = None
 
@@ -375,6 +412,12 @@ class GrokBuildAdapter:
         """Most recent ready preflight's safe capability facts."""
 
         return self._last_capabilities
+
+    @property
+    def last_classification(self) -> GrokBuildOutcomeClassification | None:
+        """Most recent run's normalized outcome evidence."""
+
+        return self._last_classification
 
     def preflight(self, request: RunnerRequest) -> PreflightResult:
         """Run documented Grok Build readiness probes without starting a task."""
@@ -393,6 +436,7 @@ class GrokBuildAdapter:
         )
         artifacts: list[ProviderArtifactReference] = []
         self._last_capabilities = None
+        self._last_classification = None
         self._ready_executable = None
         self._ready_identity = None
 
@@ -720,65 +764,71 @@ class GrokBuildAdapter:
             if decision_bytes is not None
             else None
         )
-        if facts.timed_out:
-            raise GrokBuildExecutionError(
-                "deadline",
-                "Grok Build process tree was terminated at the shared deadline",
-                facts=facts,
-                decision_checksum=decision_checksum,
-                artifact_references=artifact_paths,
-            )
-        if facts.exit_status != 0:
-            raise GrokBuildExecutionError(
-                "exit_status",
-                "Grok Build fresh run exited unsuccessfully",
-                facts=facts,
-                decision_checksum=decision_checksum,
-                artifact_references=artifact_paths,
-            )
-        if decision_bytes is None:
-            raise GrokBuildExecutionError(
-                "decision",
-                "Grok Build fresh run did not write outbox/decision.json",
-                facts=facts,
-                decision_checksum=None,
-                artifact_references=artifact_paths,
-            )
+        self._append_preflight_event(
+            request,
+            event_type="decision_collected",
+            timestamp=facts.finished_at,
+            payload={
+                "decision_present": decision_bytes is not None,
+                "decision_checksum": decision_checksum,
+            },
+            artifacts=(),
+        )
 
-        observed_session = _require_one_session_id(facts.stdout)
-        if stored_session is None:
+        classification, events = _classify_grok_build_outcome(
+            facts,
+            decision_present=decision_bytes is not None,
+        )
+        self._last_classification = classification
+
+        observed_session = _optional_session_reference(events)
+        if observed_session is None and classification.outcome in {
+            "completed",
+            "missing_decision",
+        }:
+            raise GrokBuildSessionError(
+                "session_reference",
+                "completed Grok Build output omitted sessionId",
+            )
+        if stored_session is None and observed_session is not None:
             self._session_store.save(
                 request.product_id,
                 request.replica_id,
                 observed_session,
             )
-        elif observed_session != stored_session:
+        elif (
+            stored_session is not None
+            and observed_session is not None
+            and observed_session != stored_session
+        ):
             raise GrokBuildSessionError(
                 "session_reference",
                 "resumed Grok Build output reported a different session",
             )
         result_session = stored_session or observed_session
 
-        self._append_preflight_event(
-            request,
-            event_type="decision_collected",
-            timestamp=facts.finished_at,
-            payload={
-                "decision_present": True,
-                "decision_checksum": decision_checksum,
-            },
-            artifacts=(),
-        )
+        if classification.outcome == "timeout":
+            self._append_preflight_event(
+                request,
+                event_type="replica_terminated",
+                timestamp=facts.finished_at,
+                payload={
+                    "reason": "deadline",
+                    "exit_status": facts.exit_status,
+                },
+                artifacts=(),
+            )
+
         result = RunnerResult(
             contract_version=RUNNER_CONTRACT_VERSION,
             product_id=request.product_id,
             replica_id=request.replica_id,
             round_id=request.round_id,
-            outcome="completed",
+            outcome=classification.outcome,
             started_at=facts.started_at,
             finished_at=facts.finished_at,
             exit_status=facts.exit_status,
-            decision_present=True,
+            decision_present=decision_bytes is not None,
             decision_checksum=decision_checksum,
             session_reference=result_session,
             artifact_references=artifact_paths,
@@ -1189,22 +1239,83 @@ def _store_segment(value: str, *, path: str) -> None:
         raise GrokBuildSessionError(exc.path, exc.message) from exc
 
 
-def _require_one_session_id(value: bytes) -> str:
-    collected = _collect_session_ids(value)
-    if collected is None:
-        raise GrokBuildSessionError(
-            "session_reference",
-            "Grok Build output was not valid JSON or JSONL",
-        )
-    if len(collected) != 1:
-        raise GrokBuildSessionError(
-            "session_reference",
-            "completed Grok Build output must contain exactly one sessionId",
-        )
-    return collected[0]
+def classify_grok_build_outcome(
+    facts: ProcessFacts,
+    *,
+    decision_present: bool,
+) -> GrokBuildOutcomeClassification:
+    """Map explicit Grok Build JSON/JSONL/raw facts to exactly one R2 outcome."""
+
+    classification, _ = _classify_grok_build_outcome(
+        facts,
+        decision_present=decision_present,
+    )
+    return classification
 
 
-def _collect_session_ids(value: bytes) -> tuple[str, ...] | None:
+def _classify_grok_build_outcome(
+    facts: ProcessFacts,
+    *,
+    decision_present: bool,
+) -> tuple[GrokBuildOutcomeClassification, tuple[Mapping[str, Any], ...]]:
+    events = _parse_grok_jsonl(facts.stdout)
+    if events is None:
+        return (
+            GrokBuildOutcomeClassification("runner_error", (), (), False),
+            (),
+        )
+    event_types = tuple(str(event["type"]) for event in events)
+    error_codes: set[str] = set()
+    for event in events:
+        event_type = str(event["type"])
+        if event_type == "error":
+            _collect_error_codes(event, error_codes)
+        if event_type == "end":
+            reason = _normalize_code(event.get("stopReason"))
+            if reason and reason not in _SUCCESS_STOP_REASONS:
+                error_codes.add(reason)
+
+    classes: set[str] = set()
+    if error_codes & GROK_BUILD_QUOTA_ERROR_CODES:
+        classes.add("quota_exhausted")
+    if error_codes & GROK_BUILD_PROVIDER_UNAVAILABLE_CODES:
+        classes.add("provider_unavailable")
+    if error_codes & GROK_BUILD_REFUSAL_CODES:
+        classes.add("refusal")
+    known_codes = (
+        GROK_BUILD_QUOTA_ERROR_CODES
+        | GROK_BUILD_PROVIDER_UNAVAILABLE_CODES
+        | GROK_BUILD_REFUSAL_CODES
+    )
+    unknown_codes = error_codes - known_codes
+
+    if len(classes) != 1 or unknown_codes:
+        if classes or error_codes:
+            outcome = "runner_error"
+        elif facts.timed_out:
+            outcome = "timeout"
+        elif (
+            facts.exit_status == 0
+            and _successful_end(events, event_types)
+        ):
+            outcome = "completed" if decision_present else "missing_decision"
+        else:
+            outcome = "runner_error"
+    else:
+        outcome = next(iter(classes))
+
+    return (
+        GrokBuildOutcomeClassification(
+            outcome=outcome,
+            event_types=event_types,
+            error_codes=tuple(sorted(error_codes)),
+            jsonl_valid=True,
+        ),
+        events,
+    )
+
+
+def _parse_grok_jsonl(value: bytes) -> tuple[Mapping[str, Any], ...] | None:
     events: list[Mapping[str, Any]] = []
     for raw_line in value.splitlines():
         if not raw_line.strip():
@@ -1215,17 +1326,71 @@ def _collect_session_ids(value: bytes) -> tuple[str, ...] | None:
             return None
         if not isinstance(event, dict):
             return None
+        event_type = event.get("type")
+        if not isinstance(event_type, str) or not event_type:
+            if "stopReason" in event or "sessionId" in event:
+                event = {**event, "type": "end"}
+            else:
+                return None
         events.append(event)
-    end_ids: list[str] = []
+    return tuple(events)
+
+
+def _successful_end(
+    events: Sequence[Mapping[str, Any]],
+    event_types: tuple[str, ...],
+) -> bool:
+    if "error" in event_types or "end" not in event_types:
+        return False
     for event in events:
-        if event.get("type") == "end":
-            session_id = event.get("sessionId")
-            if isinstance(session_id, str) and session_id and session_id.strip() == session_id:
-                end_ids.append(session_id)
-    if end_ids:
-        return tuple(end_ids)
-    if len(events) == 1:
+        if event.get("type") != "end":
+            continue
+        reason = event.get("stopReason")
+        if reason is None:
+            continue
+        if _normalize_code(reason) not in _SUCCESS_STOP_REASONS:
+            return False
+    return True
+
+
+def _optional_session_reference(events: Sequence[Mapping[str, Any]]) -> str | None:
+    references: list[str] = []
+    for event in events:
+        if event.get("type") != "end":
+            continue
+        session_id = event.get("sessionId")
+        if isinstance(session_id, str) and session_id and session_id.strip() == session_id:
+            references.append(session_id)
+    if not references and len(events) == 1:
         session_id = events[0].get("sessionId")
         if isinstance(session_id, str) and session_id and session_id.strip() == session_id:
-            return (session_id,)
-    return ()
+            references.append(session_id)
+    if not references:
+        return None
+    if len(references) != 1:
+        raise GrokBuildSessionError(
+            "session_reference",
+            "Grok Build output contained multiple session references",
+        )
+    return references[0]
+
+
+def _collect_error_codes(value: object, codes: set[str]) -> None:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            normalized_key = _normalize_code(key)
+            if normalized_key in _ERROR_CODE_KEYS:
+                normalized_value = _normalize_code(child)
+                if normalized_value:
+                    codes.add(normalized_value)
+            _collect_error_codes(child, codes)
+    elif isinstance(value, list):
+        for child in value:
+            _collect_error_codes(child, codes)
+
+
+def _normalize_code(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    with_boundaries = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value.strip())
+    return re.sub(r"[^a-zA-Z0-9]+", "_", with_boundaries).strip("_").casefold()

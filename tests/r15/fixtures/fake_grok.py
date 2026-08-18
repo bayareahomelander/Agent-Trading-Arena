@@ -94,6 +94,7 @@ def main() -> int:
             )
     else:
         print(json.dumps({"type": "text", "data": "no session"}))
+        print(json.dumps({"type": "end", "stopReason": "end_turn"}))
     return 0
 
 

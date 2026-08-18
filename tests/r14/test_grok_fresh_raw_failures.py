@@ -1,4 +1,4 @@
-"""R14: unsuccessful raw facts remain unclassified until R16."""
+"""R14: unsuccessful raw facts are now classified by R16."""
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -28,13 +28,12 @@ def test_timeout_uses_shared_deadline_without_mapping_provider_meaning(
         deadline=datetime.now(timezone.utc) + timedelta(seconds=0.5),
     )
 
-    with pytest.raises(GrokBuildExecutionError) as exc:
-        adapter.run(timed_request)
+    result = adapter.run(timed_request)
 
-    assert exc.value.path == "deadline"
-    assert exc.value.facts is not None
-    assert exc.value.facts.timed_out is True
-    assert exc.value.decision_checksum is None
+    assert result.outcome == "timeout"
+    assert result.decision_checksum is None
+    assert adapter.last_classification is not None
+    assert adapter.last_classification.outcome == "timeout"
 
 
 def test_nonzero_exit_retains_raw_facts_and_exact_decision_checksum(
@@ -43,27 +42,25 @@ def test_nonzero_exit_retains_raw_facts_and_exact_decision_checksum(
     adapter, request, _, _, _ = make_case(tmp_path, run_exit=7)
     assert adapter.preflight(request).ready
 
-    with pytest.raises(GrokBuildExecutionError) as exc:
-        adapter.run(request)
+    result = adapter.run(request)
 
-    assert exc.value.path == "exit_status"
-    assert exc.value.facts is not None
-    assert exc.value.facts.exit_status == 7
-    assert exc.value.decision_checksum is not None
-    assert exc.value.artifact_references
+    assert result.outcome == "runner_error"
+    assert result.exit_status == 7
+    assert result.decision_checksum is not None
+    assert result.artifact_references
 
 
-def test_missing_decision_remains_unclassified(tmp_path: Path) -> None:
+def test_missing_decision_is_classified_without_inventing_bytes(
+    tmp_path: Path,
+) -> None:
     adapter, request, _, _, _ = make_case(tmp_path, decision_bytes=None)
     assert adapter.preflight(request).ready
 
-    with pytest.raises(GrokBuildExecutionError) as exc:
-        adapter.run(request)
+    result = adapter.run(request)
 
-    assert exc.value.path == "decision"
-    assert exc.value.facts is not None
-    assert exc.value.facts.exit_status == 0
-    assert exc.value.decision_checksum is None
+    assert result.outcome == "missing_decision"
+    assert result.exit_status == 0
+    assert result.decision_checksum is None
 
 
 def test_fresh_run_rejects_stale_outbox_before_process_launch(tmp_path: Path) -> None:
