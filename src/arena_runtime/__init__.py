@@ -8,11 +8,18 @@ never depend on this package.
 from arena_runtime.audit import (
     AUDIT_EVENT_TYPES,
     AUDIT_SCHEMA_VERSION,
+    NORMALIZED_EVENTS_PATH,
+    PROVIDER_ARTIFACT_PREFIX,
+    REDACTION_MARKER,
+    AuditArchive,
+    AuditArchiveError,
     AuditEvent,
     ProviderArtifactReference,
     audit_event_to_dict,
     dump_audit_event,
     parse_audit_event,
+    redact_provider_bytes,
+    validate_audit_environment,
 )
 from arena_runtime.module_map import CONCEPT_OWNERS, RUNTIME_MODULES
 from arena_runtime.registration import (
@@ -39,6 +46,11 @@ from arena_runtime.vocabulary import STABLE_TERMS
 __all__ = [
     "AUDIT_EVENT_TYPES",
     "AUDIT_SCHEMA_VERSION",
+    "NORMALIZED_EVENTS_PATH",
+    "PROVIDER_ARTIFACT_PREFIX",
+    "REDACTION_MARKER",
+    "AuditArchive",
+    "AuditArchiveError",
     "AuditEvent",
     "CAPABILITY_NAMES",
     "CONCEPT_OWNERS",
@@ -60,6 +72,8 @@ __all__ = [
     "dump_runtime_registration",
     "parse_audit_event",
     "parse_runtime_registration",
+    "redact_provider_bytes",
     "require_matching_identity",
     "runtime_registration_to_dict",
+    "validate_audit_environment",
 ]

@@ -7,10 +7,12 @@ write, or redaction behavior belongs here.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any, Final, Mapping
 
 from arena_kernel.schema._dump import dump_json
@@ -30,6 +32,9 @@ from arena_kernel.types import format_et_timestamp
 from arena_runtime.runner import RUNNER_OUTCOMES
 
 AUDIT_SCHEMA_VERSION: Final[str] = SCHEMA_VERSION
+NORMALIZED_EVENTS_PATH: Final[str] = "normalized/events.jsonl"
+PROVIDER_ARTIFACT_PREFIX: Final[str] = "provider"
+REDACTION_MARKER: Final[bytes] = b"[REDACTED]"
 
 AUDIT_EVENT_TYPES: Final[tuple[str, ...]] = (
     "preflight_started",
@@ -94,6 +99,64 @@ _SECRET_FIELD_SUFFIXES: Final[tuple[str, ...]] = (
     "_password",
     "_secret",
     "_token",
+)
+
+_SECRET_KEY_BYTES = (
+    rb"[A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|"
+    rb"oauth[_-]?token|authorization|cookie|password|client[_-]?secret)"
+)
+_QUOTED_SECRET_VALUE = re.compile(
+    rb"(?i)(?P<prefix>[\"']?"
+    + _SECRET_KEY_BYTES
+    + rb"[\"']?\s*:\s*)(?P<quote>[\"'])(?P<value>.*?)(?P=quote)"
+)
+_ASSIGNED_SECRET_VALUE = re.compile(
+    rb"(?im)(?P<prefix>\b" + _SECRET_KEY_BYTES + rb"\s*=\s*)(?P<value>[^\s\r\n]+)"
+)
+_SECRET_HEADER_VALUE = re.compile(
+    rb"(?im)(?P<prefix>\b(?:authorization|cookie|set-cookie)\s*:\s*)"
+    rb"(?P<value>[^\r\n]+)"
+)
+_BEARER_VALUE = re.compile(
+    rb"(?i)(?P<prefix>\bBearer\s+)(?P<value>[A-Za-z0-9._~+/-]+=*)"
+)
+_RAW_TOKEN_VALUE = re.compile(
+    rb"(?i)\b(?:sk|api|oauth)[-_][A-Za-z0-9._-]{8,}\b"
+)
+_JWT_VALUE = re.compile(
+    rb"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+)
+
+_AUTH_CACHE_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        ".auth",
+        ".credentials",
+        "auth",
+        "auth_cache",
+        "cookie_store",
+        "cookies",
+        "credential_store",
+        "credentials",
+        "keychain",
+        "oauth",
+        "oauth_cache",
+        "token",
+        "token_store",
+        "tokens",
+    }
+)
+
+_SECRET_ENV_MARKERS: Final[tuple[str, ...]] = (
+    "API_KEY",
+    "APIKEY",
+    "AUTHORIZATION",
+    "COOKIE",
+    "CREDENTIAL",
+    "CREDENTIALS",
+    "PASSWORD",
+    "PRIVATE_KEY",
+    "SECRET",
+    "TOKEN",
 )
 
 
@@ -195,6 +258,205 @@ class AuditEvent:
     timestamp: datetime
     payload: AuditPayload
     provider_artifacts: tuple[ProviderArtifactReference, ...]
+
+
+class AuditArchiveError(ValueError):
+    """Unsafe or inconsistent archive operation with a stable field path."""
+
+    def __init__(self, path: str, message: str) -> None:
+        self.path = path
+        self.message = message
+        super().__init__(f"{path}: {message}")
+
+
+class AuditArchive:
+    """Append normalized events and immutable sanitized provider artifacts."""
+
+    def __init__(self, root: Path | str) -> None:
+        if not isinstance(root, (Path, str)):
+            raise AuditArchiveError("root", "expected a path")
+        candidate = Path(root).resolve(strict=False)
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise AuditArchiveError("root", f"cannot create archive root: {exc}") from exc
+        if not candidate.is_dir():
+            raise AuditArchiveError("root", "must be a directory")
+        self._root = candidate
+
+    @property
+    def root(self) -> Path:
+        """Resolved archive root."""
+
+        return self._root
+
+    @property
+    def events_path(self) -> Path:
+        """Resolved normalized JSONL path."""
+
+        return self._target(NORMALIZED_EVENTS_PATH, path="events_path")
+
+    def append_event(self, event: AuditEvent) -> Path:
+        """Append one canonical compact JSON object after artifact verification."""
+
+        canonical = parse_audit_event(audit_event_to_dict(event))
+        for artifact in canonical.provider_artifacts:
+            self._verify_artifact(artifact)
+        event_bytes = (
+            json.dumps(
+                audit_event_to_dict(canonical),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        target = self.events_path
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("ab") as stream:
+                stream.write(event_bytes)
+        except OSError as exc:
+            raise AuditArchiveError(
+                "events_path",
+                f"cannot append normalized event: {exc}",
+            ) from exc
+        return target
+
+    def write_provider_artifact(
+        self,
+        relative_path: str,
+        provider_bytes: bytes,
+        *,
+        source_path: Path | str | None = None,
+        environment: Mapping[str, str] | None = None,
+    ) -> ProviderArtifactReference:
+        """Redact and immutably store one provider text-stream artifact."""
+
+        if source_path is not None:
+            _reject_auth_cache_path(source_path, path="source_path")
+        if environment is not None:
+            validate_audit_environment(environment)
+        artifact_path = _require_provider_artifact_path(relative_path)
+        sanitized = redact_provider_bytes(provider_bytes)
+        checksum = hashlib.sha256(sanitized).hexdigest()
+        target = self._target(artifact_path, path="relative_path")
+        self._write_immutable(target, sanitized, path="relative_path")
+        digest_target = self._target(
+            f"{artifact_path}.sha256",
+            path="relative_path",
+        )
+        self._write_immutable(
+            digest_target,
+            (checksum + "\n").encode("ascii"),
+            path="relative_path",
+        )
+        return ProviderArtifactReference(path=artifact_path, checksum=checksum)
+
+    def _verify_artifact(self, artifact: ProviderArtifactReference) -> None:
+        artifact_path = _require_provider_artifact_path(artifact.path)
+        target = self._target(artifact_path, path="provider_artifacts.path")
+        try:
+            content = target.read_bytes()
+        except OSError as exc:
+            raise AuditArchiveError(
+                "provider_artifacts.path",
+                f"referenced artifact is unavailable: {artifact_path}",
+            ) from exc
+        actual = hashlib.sha256(content).hexdigest()
+        if actual != artifact.checksum:
+            raise AuditArchiveError(
+                "provider_artifacts.checksum",
+                "does not match archived artifact bytes",
+            )
+        digest_target = self._target(
+            f"{artifact_path}.sha256",
+            path="provider_artifacts.path",
+        )
+        try:
+            stored = digest_target.read_text(encoding="ascii").strip()
+        except OSError as exc:
+            raise AuditArchiveError(
+                "provider_artifacts.path",
+                "artifact checksum sidecar is unavailable",
+            ) from exc
+        if stored != artifact.checksum:
+            raise AuditArchiveError(
+                "provider_artifacts.checksum",
+                "does not match checksum sidecar",
+            )
+
+    def _write_immutable(self, target: Path, data: bytes, *, path: str) -> None:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                if not target.is_file() or target.read_bytes() != data:
+                    raise AuditArchiveError(
+                        path,
+                        "archive path already exists with different bytes",
+                    )
+                return
+            target.write_bytes(data)
+        except AuditArchiveError:
+            raise
+        except OSError as exc:
+            raise AuditArchiveError(path, f"cannot write archive artifact: {exc}") from exc
+
+    def _target(self, relative_path: str, *, path: str) -> Path:
+        pure_path = _require_safe_relative_path(relative_path, path=path)
+        target = self._root.joinpath(*pure_path.parts).resolve(strict=False)
+        if not target.is_relative_to(self._root):
+            raise AuditArchiveError(path, "must stay under the archive root")
+        return target
+
+
+def redact_provider_bytes(provider_bytes: bytes) -> bytes:
+    """Deterministically remove common credential forms from provider output."""
+
+    if not isinstance(provider_bytes, bytes):
+        raise AuditArchiveError("provider_bytes", "expected bytes")
+    sanitized = _QUOTED_SECRET_VALUE.sub(_redact_quoted_match, provider_bytes)
+    sanitized = _ASSIGNED_SECRET_VALUE.sub(
+        lambda match: match.group("prefix") + REDACTION_MARKER,
+        sanitized,
+    )
+    sanitized = _SECRET_HEADER_VALUE.sub(
+        lambda match: match.group("prefix") + REDACTION_MARKER,
+        sanitized,
+    )
+    sanitized = _BEARER_VALUE.sub(
+        lambda match: match.group("prefix") + REDACTION_MARKER,
+        sanitized,
+    )
+    sanitized = _RAW_TOKEN_VALUE.sub(REDACTION_MARKER, sanitized)
+    return _JWT_VALUE.sub(REDACTION_MARKER, sanitized)
+
+
+def validate_audit_environment(environment: Mapping[str, str]) -> None:
+    """Reject secret-bearing environment metadata; never serialize the map."""
+
+    if not isinstance(environment, Mapping):
+        raise AuditArchiveError("environment", "expected a mapping")
+    for key, value in environment.items():
+        if not isinstance(key, str) or not key or key.strip() != key:
+            raise AuditArchiveError(
+                "environment",
+                "keys must be non-empty strings without padding",
+            )
+        field = f"environment.{key}"
+        if not isinstance(value, str):
+            raise AuditArchiveError(field, "expected a string value")
+        normalized = re.sub(r"[^A-Z0-9]+", "_", key.upper()).strip("_")
+        parts = tuple(part for part in normalized.split("_") if part)
+        secret_key = any(marker in parts for marker in _SECRET_ENV_MARKERS[1:])
+        secret_key = secret_key or "_".join(parts[-2:]) in {
+            "API_KEY",
+            "PRIVATE_KEY",
+        }
+        if secret_key:
+            raise AuditArchiveError(field, "secret-bearing environment key")
+        raw_value = value.encode("utf-8")
+        if redact_provider_bytes(raw_value) != raw_value:
+            raise AuditArchiveError(field, "secret-shaped environment value")
 
 
 def parse_audit_event(data: Mapping[str, Any] | str | bytes) -> AuditEvent:
@@ -536,6 +798,56 @@ def _validate_artifact_path(value: str, *, path: str) -> None:
         raise SchemaError(path, "must be a safe relative archive path")
     if artifact_path.as_posix() != value or value in {".", ""}:
         raise SchemaError(path, "must be a normalized relative archive path")
+
+
+def _require_provider_artifact_path(value: str) -> str:
+    pure_path = _require_safe_relative_path(value, path="relative_path")
+    if not pure_path.parts or pure_path.parts[0] != PROVIDER_ARTIFACT_PREFIX:
+        raise AuditArchiveError(
+            "relative_path",
+            f"must start with {PROVIDER_ARTIFACT_PREFIX}/",
+        )
+    _reject_auth_cache_path(
+        Path(*pure_path.parts),
+        path="relative_path",
+    )
+    return pure_path.as_posix()
+
+
+def _require_safe_relative_path(value: str, *, path: str) -> PurePosixPath:
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise AuditArchiveError(
+            path,
+            "must be a non-empty relative path without padding",
+        )
+    pure_path = PurePosixPath(value)
+    if pure_path.is_absolute() or "\\" in value or ".." in pure_path.parts:
+        raise AuditArchiveError(path, "must be a safe relative archive path")
+    if pure_path.as_posix() != value or value == ".":
+        raise AuditArchiveError(path, "must be a normalized relative archive path")
+    return pure_path
+
+
+def _reject_auth_cache_path(value: Path | str, *, path: str) -> None:
+    if not isinstance(value, (Path, str)):
+        raise AuditArchiveError(path, "expected a path")
+    text = str(value)
+    if not text or text.strip() != text:
+        raise AuditArchiveError(path, "must be a non-empty path without padding")
+    for part in Path(value).parts:
+        normalized = part.casefold().replace("-", "_")
+        stem = Path(part).stem.casefold().replace("-", "_")
+        if normalized in _AUTH_CACHE_NAMES or stem in _AUTH_CACHE_NAMES:
+            raise AuditArchiveError(path, "authentication-cache paths are prohibited")
+
+
+def _redact_quoted_match(match: re.Match[bytes]) -> bytes:
+    return (
+        match.group("prefix")
+        + match.group("quote")
+        + REDACTION_MARKER
+        + match.group("quote")
+    )
 
 
 def _format_timestamp(value: datetime, *, path: str) -> str:

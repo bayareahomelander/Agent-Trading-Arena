@@ -1,10 +1,10 @@
-"""R4: the audit layer never acquires process, network, or provider edges."""
+"""R5: the archive writer does not launch or interpret providers."""
 
 import ast
 from pathlib import Path
 
 
-def test_audit_module_has_no_process_network_or_provider_imports() -> None:
+def test_audit_archive_has_no_process_network_or_provider_imports() -> None:
     module = Path(__file__).parents[2] / "src" / "arena_runtime" / "audit.py"
     tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
     roots: set[str] = set()
