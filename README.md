@@ -76,8 +76,8 @@ Requirements:
 Clone the repository and create a virtual environment:
 
 ```bash
-git clone https://github.com/bayareahomelander/AgentTradingArena.git
-cd AgentTradingArena
+git clone https://github.com/bayareahomelander/Agent-Trading-Arena.git
+cd Agent-Trading-Arena
 python -m venv .venv
 ```
 
