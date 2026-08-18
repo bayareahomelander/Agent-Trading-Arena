@@ -50,7 +50,7 @@ def test_fresh_exec_uses_frozen_argv_cwd_and_prompt_bytes(tmp_path: Path) -> Non
     assert "resume" not in capture["argv"]
     assert "--ephemeral" not in capture["argv"]
     assert result.outcome == "completed"
-    assert result.session_reference is None
+    assert result.session_reference == "fresh-thread-id"
 
 
 def test_exact_outbox_bytes_are_hashed_but_never_parsed_or_rewritten(

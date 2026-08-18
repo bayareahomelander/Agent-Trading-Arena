@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import shutil
+import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -73,6 +74,9 @@ _REQUIRED_EXEC_CAPABILITIES: Final[tuple[str, ...]] = (
     "--strict-config",
     "resume",
 )
+_SESSION_SCHEMA_VERSION: Final[str] = "1"
+_SESSION_LOCKS: dict[Path, threading.Lock] = {}
+_SESSION_LOCKS_GUARD = threading.Lock()
 
 
 class CodexPreflightError(ValueError):
@@ -104,6 +108,145 @@ class CodexExecutionError(ValueError):
         super().__init__(f"{path}: {message}")
 
 
+class CodexSessionError(ValueError):
+    """Missing, corrupt, ambiguous, or cross-replica Codex session state."""
+
+    def __init__(self, path: str, message: str) -> None:
+        self.path = path
+        self.message = message
+        super().__init__(f"{path}: {message}")
+
+
+class CodexSessionStore:
+    """Immutable one-to-one Codex session references outside agent workspaces."""
+
+    def __init__(self, root: Path | str) -> None:
+        if not isinstance(root, (Path, str)):
+            raise CodexSessionError("session_store", "expected a path")
+        resolved = Path(root).resolve(strict=False)
+        try:
+            resolved.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise CodexSessionError(
+                "session_store",
+                f"cannot create session store: {exc}",
+            ) from exc
+        if not resolved.is_dir():
+            raise CodexSessionError("session_store", "must be a directory")
+        self._root = resolved
+        with _SESSION_LOCKS_GUARD:
+            self._lock = _SESSION_LOCKS.setdefault(resolved, threading.Lock())
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
+    def record_path(self, product_id: str, replica_id: str) -> Path:
+        _store_segment(product_id, path="product_id")
+        _store_segment(replica_id, path="replica_id")
+        return (self._root / product_id / f"{replica_id}.json").resolve(strict=False)
+
+    def save(
+        self,
+        product_id: str,
+        replica_id: str,
+        session_reference: str,
+    ) -> Path:
+        reference = _session_reference(session_reference)
+        target = self.record_path(product_id, replica_id)
+        payload = {
+            "schema_version": _SESSION_SCHEMA_VERSION,
+            "product_id": product_id,
+            "replica_id": replica_id,
+            "session_reference": reference,
+        }
+        data = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+        with self._lock:
+            for record in self._root.rglob("*.json"):
+                stored = self._load_path(record)
+                if stored["session_reference"] == reference and record != target:
+                    raise CodexSessionError(
+                        "session_reference",
+                        "is already mapped to another product or replica",
+                    )
+            if target.exists():
+                stored = self._load_path(target)
+                if stored != payload:
+                    raise CodexSessionError(
+                        "session_reference",
+                        "replica already has a different stored session",
+                    )
+                return target
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("xb") as stream:
+                    stream.write(data)
+            except FileExistsError:
+                stored = self._load_path(target)
+                if stored != payload:
+                    raise CodexSessionError(
+                        "session_reference",
+                        "replica session was concurrently replaced",
+                    )
+            except OSError as exc:
+                raise CodexSessionError(
+                    "session_store",
+                    f"cannot persist session reference: {exc}",
+                ) from exc
+        return target
+
+    def load(self, product_id: str, replica_id: str) -> str:
+        target = self.record_path(product_id, replica_id)
+        with self._lock:
+            if not target.is_file():
+                raise CodexSessionError(
+                    "session_reference",
+                    "stored session is missing for this replica",
+                )
+            return str(self._load_path(target)["session_reference"])
+
+    def _load_path(self, path: Path) -> dict[str, str]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CodexSessionError(
+                "session_reference",
+                "stored session record is corrupt",
+            ) from exc
+        required = {
+            "schema_version",
+            "product_id",
+            "replica_id",
+            "session_reference",
+        }
+        if not isinstance(payload, dict) or set(payload) != required:
+            raise CodexSessionError(
+                "session_reference",
+                "stored session record has an invalid shape",
+            )
+        for key in required:
+            if not isinstance(payload[key], str):
+                raise CodexSessionError(
+                    "session_reference",
+                    f"stored session field {key!r} is invalid",
+                )
+        if payload["schema_version"] != _SESSION_SCHEMA_VERSION:
+            raise CodexSessionError(
+                "session_reference",
+                "stored session schema version is unsupported",
+            )
+        _store_segment(payload["product_id"], path="product_id")
+        _store_segment(payload["replica_id"], path="replica_id")
+        _session_reference(payload["session_reference"])
+        expected = self.record_path(payload["product_id"], payload["replica_id"])
+        if expected != path.resolve(strict=False):
+            raise CodexSessionError(
+                "session_reference",
+                "stored session identity does not match its path",
+            )
+        return {key: str(payload[key]) for key in required}
+
+
 @dataclass(frozen=True)
 class CodexPreflightCapabilities:
     """Non-secret Codex capability facts proven by preflight."""
@@ -132,6 +275,7 @@ class CodexAdapter:
         launch: ReplicaLaunch,
         *,
         archive: AuditArchive,
+        session_store: CodexSessionStore | None = None,
         executable_name: str = "codex",
         executable_prefix: Sequence[str] = (),
     ) -> None:
@@ -141,6 +285,25 @@ class CodexAdapter:
             raise CodexPreflightError("launch", "expected ReplicaLaunch")
         if not isinstance(archive, AuditArchive):
             raise CodexPreflightError("archive", "expected AuditArchive")
+        resolved_session_store = (
+            CodexSessionStore(
+                archive.root.parent / "runtime-state" / "codex-sessions"
+            )
+            if session_store is None
+            else session_store
+        )
+        if not isinstance(resolved_session_store, CodexSessionStore):
+            raise CodexPreflightError(
+                "session_store",
+                "expected CodexSessionStore",
+            )
+        if resolved_session_store.root == launch.workspace or (
+            resolved_session_store.root.is_relative_to(launch.workspace)
+        ):
+            raise CodexPreflightError(
+                "session_store",
+                "must be outside the replica workspace",
+            )
         if registration.provider_id != CODEX_PROVIDER_ID:
             raise CodexPreflightError(
                 "provider_id",
@@ -175,6 +338,7 @@ class CodexAdapter:
         self._registration = registration
         self._launch = launch
         self._archive = archive
+        self._session_store = resolved_session_store
         self._executable_name = executable_name
         self._executable_prefix = prefix
         self._last_capabilities: CodexPreflightCapabilities | None = None
@@ -368,7 +532,7 @@ class CodexAdapter:
         )
 
     def run(self, request: RunnerRequest) -> RunnerResult:
-        """Execute one documented fresh Codex session and collect exact output."""
+        """Execute a fresh or exact stored-session Codex round."""
 
         if not isinstance(request, RunnerRequest):
             raise CodexExecutionError("request", "expected RunnerRequest")
@@ -378,11 +542,28 @@ class CodexAdapter:
                 "preflight",
                 "matching ready preflight is required before execution",
             )
-        if request.session_reference is not None:
-            raise CodexExecutionError(
-                "session_reference",
-                "R10 supports fresh sessions only",
+        stored_session: str | None = None
+        if request.session_reference is None:
+            stored_path = self._session_store.record_path(
+                request.product_id,
+                request.replica_id,
             )
+            if stored_path.exists():
+                self._session_store.load(request.product_id, request.replica_id)
+                raise CodexSessionError(
+                    "session_reference",
+                    "stored session exists; an explicit matching reference is required",
+                )
+        else:
+            stored_session = self._session_store.load(
+                request.product_id,
+                request.replica_id,
+            )
+            if request.session_reference != stored_session:
+                raise CodexSessionError(
+                    "session_reference",
+                    "does not match the session stored for this replica",
+                )
         try:
             prompt = request.launch_instruction.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -409,17 +590,26 @@ class CodexAdapter:
             timestamp=launched_at,
             payload={
                 "deadline": request.deadline.isoformat(),
-                "session_reference": None,
+                "session_reference": stored_session,
             },
             artifacts=(),
         )
         try:
             facts = run_isolated_process(
                 self._launch,
-                self._fresh_exec_argv(
-                    self._ready_executable,
-                    request,
-                    prompt,
+                (
+                    self._fresh_exec_argv(
+                        self._ready_executable,
+                        request,
+                        prompt,
+                    )
+                    if stored_session is None
+                    else self._resume_exec_argv(
+                        self._ready_executable,
+                        request,
+                        stored_session,
+                        prompt,
+                    )
                 ),
                 deadline=request.deadline,
             )
@@ -471,6 +661,19 @@ class CodexAdapter:
                 artifact_references=artifact_paths,
             )
 
+        observed_session = _thread_reference(facts.stdout)
+        if stored_session is None:
+            self._session_store.save(
+                request.product_id,
+                request.replica_id,
+                observed_session,
+            )
+        elif observed_session != stored_session:
+            raise CodexSessionError(
+                "session_reference",
+                "resumed Codex output reported a different thread",
+            )
+
         result = RunnerResult(
             contract_version=RUNNER_CONTRACT_VERSION,
             product_id=request.product_id,
@@ -482,7 +685,7 @@ class CodexAdapter:
             exit_status=facts.exit_status,
             decision_present=True,
             decision_checksum=decision_checksum,
-            session_reference=None,
+            session_reference=observed_session,
             artifact_references=artifact_paths,
         )
         self._append_preflight_event(
@@ -492,7 +695,7 @@ class CodexAdapter:
             payload={
                 "outcome": result.outcome,
                 "exit_status": result.exit_status,
-                "session_reference": None,
+                "session_reference": observed_session,
             },
             artifacts=artifacts,
         )
@@ -526,6 +729,40 @@ class CodexAdapter:
             "--ignore-user-config",
             "--ignore-rules",
             "--skip-git-repo-check",
+            prompt,
+        )
+
+    def _resume_exec_argv(
+        self,
+        executable: Path,
+        request: RunnerRequest,
+        session_reference: str,
+        prompt: str,
+    ) -> tuple[str, ...]:
+        return (
+            str(executable),
+            *self._executable_prefix,
+            "--model",
+            self._registration.exact_model,
+            "--config",
+            f'model_reasoning_effort="{self._registration.reasoning_mode}"',
+            "--config",
+            'model_provider="openai"',
+            "--sandbox",
+            "workspace-write",
+            "--ask-for-approval",
+            "never",
+            "--search",
+            "--strict-config",
+            "--cd",
+            str(request.workspace),
+            "exec",
+            "resume",
+            "--json",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--skip-git-repo-check",
+            session_reference,
             prompt,
         )
 
@@ -761,6 +998,39 @@ def _parse_doctor(value: bytes) -> Mapping[str, Any] | None:
     return parsed
 
 
+def _thread_reference(value: bytes) -> str:
+    references: list[str] = []
+    for index, raw_line in enumerate(value.splitlines()):
+        if not raw_line.strip():
+            continue
+        try:
+            event = json.loads(raw_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CodexSessionError(
+                "session_reference",
+                f"Codex JSONL line {index} is invalid",
+            ) from exc
+        if not isinstance(event, dict):
+            raise CodexSessionError(
+                "session_reference",
+                f"Codex JSONL line {index} is not an object",
+            )
+        if event.get("type") != "thread.started":
+            continue
+        references.append(_session_reference(event.get("thread_id")))
+    if not references:
+        raise CodexSessionError(
+            "session_reference",
+            "Codex JSONL omitted thread.started.thread_id",
+        )
+    if len(references) != 1:
+        raise CodexSessionError(
+            "session_reference",
+            "Codex JSONL contained multiple thread references",
+        )
+    return references[0]
+
+
 def _check(doctor: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     checks = doctor.get("checks")
     if not isinstance(checks, Mapping):
@@ -793,3 +1063,21 @@ def _boolean_value(value: object) -> bool | None:
 def _safe_segment(value: str, *, path: str) -> None:
     if value in {".", ".."} or "/" in value or "\\" in value:
         raise CodexPreflightError(path, "must be one safe path segment")
+
+
+def _session_reference(value: object) -> str:
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise CodexSessionError(
+            "session_reference",
+            "must be a non-empty opaque string without padding",
+        )
+    if "\x00" in value:
+        raise CodexSessionError("session_reference", "must not contain NUL")
+    return value
+
+
+def _store_segment(value: str, *, path: str) -> None:
+    try:
+        _safe_segment(value, path=path)
+    except CodexPreflightError as exc:
+        raise CodexSessionError(exc.path, exc.message) from exc

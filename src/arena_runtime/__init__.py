@@ -31,6 +31,8 @@ from arena_runtime.adapters.codex import (
     CodexExecutionError,
     CodexPreflightCapabilities,
     CodexPreflightError,
+    CodexSessionError,
+    CodexSessionStore,
 )
 from arena_runtime.isolation import (
     READ_ONLY_AREAS,
@@ -90,6 +92,8 @@ __all__ = [
     "CodexExecutionError",
     "CodexPreflightCapabilities",
     "CodexPreflightError",
+    "CodexSessionError",
+    "CodexSessionStore",
     "DEFAULT_STREAM_LIMIT",
     "FakeRunner",
     "FakeRunnerError",

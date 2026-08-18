@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from arena_runtime.adapters.codex import CodexExecutionError
+from arena_runtime.adapters.codex import CodexExecutionError, CodexSessionError
 
 from .conftest import EXACT_DECISION, make_case
 
@@ -74,12 +74,12 @@ def test_fresh_run_rejects_stale_outbox_before_process_launch(tmp_path: Path) ->
     assert not capture_path.exists()
 
 
-def test_r10_rejects_resume_reference(tmp_path: Path) -> None:
+def test_resume_reference_requires_stored_runtime_state(tmp_path: Path) -> None:
     adapter, request, _, _, _ = make_case(tmp_path)
     assert adapter.preflight(request).ready
     resumed = replace(request, session_reference="existing-session")
 
-    with pytest.raises(CodexExecutionError) as exc:
+    with pytest.raises(CodexSessionError) as exc:
         adapter.run(resumed)
 
     assert exc.value.path == "session_reference"

@@ -9,6 +9,8 @@ from arena_runtime.adapters.codex import (
     CodexExecutionError,
     CodexPreflightCapabilities,
     CodexPreflightError,
+    CodexSessionError,
+    CodexSessionStore,
 )
 from arena_runtime.adapters.fake import FakeRunner, FakeRunnerError, FakeRunnerScript
 
@@ -21,6 +23,8 @@ __all__ = [
     "CodexExecutionError",
     "CodexPreflightCapabilities",
     "CodexPreflightError",
+    "CodexSessionError",
+    "CodexSessionStore",
     "FakeRunner",
     "FakeRunnerError",
     "FakeRunnerScript",
