@@ -93,6 +93,12 @@ from arena_runtime.runner import (
     RunnerResult,
     require_matching_identity,
 )
+from arena_runtime.disposition import (
+    DispositionError,
+    ReplicaDisposition,
+    RoundDisposition,
+    decide_round_disposition,
+)
 from arena_runtime.orchestrator import (
     COMMON_DATA_AVAILABLE,
     COMMON_DATA_UNAVAILABLE,
@@ -161,6 +167,10 @@ __all__ = [
     "COMMON_DATA_UNAVAILABLE",
     "COMMON_DATA_UNAVAILABLE_REASON",
     "DecisionBarrierResult",
+    "DispositionError",
+    "ReplicaDisposition",
+    "RoundDisposition",
+    "decide_round_disposition",
     "OrchestratorError",
     "PreflightBarrierResult",
     "REPLICA_STATUS_ACTIVE",

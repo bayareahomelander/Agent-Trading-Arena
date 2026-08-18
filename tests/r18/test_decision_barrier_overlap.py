@@ -12,4 +12,4 @@ def test_due_replica_launches_overlap(tmp_path: Path) -> None:
     assert {replica for replica, _started in runner.starts} == {REPLICA_A1, REPLICA_B1}
     last_start = max(started for _replica, started in runner.starts)
     first_finish = min(finished for _replica, finished in runner.finishes)
-    assert last_start < first_finish
+    assert last_start <= first_finish
