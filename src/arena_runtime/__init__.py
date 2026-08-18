@@ -6,6 +6,15 @@ never depend on this package.
 """
 
 from arena_runtime.module_map import CONCEPT_OWNERS, RUNTIME_MODULES
+from arena_runtime.registration import (
+    CAPABILITY_NAMES,
+    SUBSCRIPTION_AUTHENTICATION,
+    RuntimeCapabilities,
+    RuntimeRegistration,
+    dump_runtime_registration,
+    parse_runtime_registration,
+    runtime_registration_to_dict,
+)
 from arena_runtime.runner import (
     RUNNER_CONTRACT_VERSION,
     RUNNER_OUTCOMES,
@@ -19,15 +28,22 @@ from arena_runtime.runner import (
 from arena_runtime.vocabulary import STABLE_TERMS
 
 __all__ = [
+    "CAPABILITY_NAMES",
     "CONCEPT_OWNERS",
     "PreflightResult",
     "RUNNER_CONTRACT_VERSION",
     "RUNNER_OUTCOMES",
     "RUNTIME_MODULES",
+    "RuntimeCapabilities",
+    "RuntimeRegistration",
     "Runner",
     "RunnerContractError",
     "RunnerRequest",
     "RunnerResult",
     "STABLE_TERMS",
+    "SUBSCRIPTION_AUTHENTICATION",
+    "dump_runtime_registration",
+    "parse_runtime_registration",
     "require_matching_identity",
+    "runtime_registration_to_dict",
 ]
