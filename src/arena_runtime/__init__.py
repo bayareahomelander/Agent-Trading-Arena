@@ -23,6 +23,12 @@ from arena_runtime.audit import (
 )
 from arena_runtime.adapters.fake import FakeRunner, FakeRunnerError, FakeRunnerScript
 from arena_runtime.module_map import CONCEPT_OWNERS, RUNTIME_MODULES
+from arena_runtime.process import (
+    DEFAULT_STREAM_LIMIT,
+    ProcessFacts,
+    ProcessSupervisorError,
+    run_process,
+)
 from arena_runtime.registration import (
     CAPABILITY_NAMES,
     SUBSCRIPTION_AUTHENTICATION,
@@ -55,10 +61,13 @@ __all__ = [
     "AuditEvent",
     "CAPABILITY_NAMES",
     "CONCEPT_OWNERS",
+    "DEFAULT_STREAM_LIMIT",
     "FakeRunner",
     "FakeRunnerError",
     "FakeRunnerScript",
     "PreflightResult",
+    "ProcessFacts",
+    "ProcessSupervisorError",
     "ProviderArtifactReference",
     "RUNNER_CONTRACT_VERSION",
     "RUNNER_OUTCOMES",
@@ -79,5 +88,6 @@ __all__ = [
     "redact_provider_bytes",
     "require_matching_identity",
     "runtime_registration_to_dict",
+    "run_process",
     "validate_audit_environment",
 ]
