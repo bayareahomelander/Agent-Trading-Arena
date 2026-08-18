@@ -6,6 +6,7 @@ R20 copies sealed outbox bytes into immutable staging without parsing them.
 R21 evaluates staged kernel-exposed bytes against book copies only.
 R22 publishes a complete candidate set atomically or publishes none.
 R23 marks published books to official closes or defers without guessing.
+R24 archives the four non-agent B7 baselines from the same tape inputs.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Final, Mapping, Sequence
 
+from arena_kernel.baselines import dump_baselines_result, run_baselines
 from arena_kernel.ledger import MissingCloseError, final_nlv, mark_to_close
 from arena_kernel.matching import apply_decision
 from arena_kernel.schema._dump import dump_json
@@ -542,6 +544,21 @@ def mark_official_close(
             marks=marks,
         ),
     )
+
+
+BASELINES_DIRECTORY: Final[str] = ".baselines"
+BASELINES_RESULT_FILE: Final[str] = "baselines.json"
+
+
+def run_archived_baselines(*, tape_dir: Path | str, books_root: Path) -> str:
+    """Run B7 baselines on archived tape inputs and store the stable dump."""
+
+    dumped = dump_baselines_result(run_baselines(tape_dir))
+    root = _require_books_root(books_root)
+    dest = root / BASELINES_DIRECTORY / BASELINES_RESULT_FILE
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(dumped, encoding="utf-8", newline="\n")
+    return dumped
 
 
 def published_snapshot_checksum(workspace: Path) -> str:
