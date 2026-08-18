@@ -10,7 +10,7 @@ For the complete experimental design and frozen rules, see [PROTOCOL.md](PROTOCO
 
 ## Status
 
-Protocol 0.2 and the offline evaluator through Phases A–C are implemented.
+Protocol 0.2, the offline evaluator (Phases A–C), and the subscription-backed runtime (Phase D) are implemented.
 
 Available now:
 
@@ -19,13 +19,14 @@ Available now:
 - Cash, SPY buy-and-hold, equal-weight, and seeded-random baselines.
 - Frozen trading calendars, early-close scheduling, and a fixture market-data vendor.
 - Reproducible tape generation, raw-input checksums, replica workspaces, and golden replay tests.
+- Provider-neutral runner contract, Codex and Grok Build adapters, fake-runner tests, isolation, sealed concurrent rounds, pause/quota/void policy, atomic commit, official-close marks, baseline orchestration, and a manual one-round CLI. Default tests use fake CLIs and no live subscription.
 
 Not implemented yet:
 
 - Live market-data integration.
-- Subscription-authenticated agent runners.
-- The wall-clock season orchestrator and pause/quota handling.
-- Process reports and a completed shakedown or scored season.
+- A wall-clock season daemon that waits for 10:00 ET and late windows.
+- Process reports and dashboards.
+- A completed three-day shakedown or scored season.
 
 ## Experiment at a glance
 
@@ -48,7 +49,7 @@ flowchart LR
     C["Frozen calendar"] --> P["Market-state publisher"]
     M["Market-data vendor"] --> P
     P --> W["Replica workspaces"]
-    W --> R["Agent runners<br/>(not implemented)"]
+    W --> R["Agent runners<br/>(no scored live season)"]
     R --> D["Sealed decision.json"]
     D --> E["Validator and paper exchange"]
     E --> L["Ledger and valuation"]
@@ -120,6 +121,13 @@ python -m pytest -q
 │   ├── ledger.py             # Close marks, NLV, and medians
 │   ├── replay.py             # Deterministic fixture-tape replay
 │   └── baselines.py          # Four non-agent comparison portfolios
+├── src/arena_runtime/
+│   ├── adapters/             # Codex, Grok Build, and fake runners
+│   ├── runner.py             # Provider-neutral runner contract
+│   ├── isolation.py          # Replica launch isolation
+│   ├── orchestrator.py       # Sealed rounds, commit, and close marks
+│   ├── audit.py              # Provider artifacts and audit events
+│   └── cli.py                # Manual one-round operator CLI
 ├── fixtures/golden/          # Frozen calendars, tapes, and expected output
 └── tests/                    # Unit and golden integration tests
 ```

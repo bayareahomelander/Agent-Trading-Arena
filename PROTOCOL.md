@@ -2,7 +2,7 @@
 
 > Same market. Same rules. Different subscribed agent systems.
 
-- **Status:** Protocol 0.2 plus an offline paper-exchange kernel (Phases A–C). Agent runners and a scored season are not started
+- **Status:** Protocol 0.2 plus an offline paper-exchange kernel (Phases A–C) and subscription-backed runners with one-round orchestration (Phase D). A scored season is not started
 - **Protocol version:** 0.2
 - **Design date:** 2026-08-17
 
@@ -12,7 +12,7 @@ Each product runs one or more isolated replicas. Every replica receives USD 1,00
 
 The first output of a season is an audit trail and a behavior report that can be reconstructed from archived data. The leaderboard is the second output. Profit is an outcome, not the proof that the experiment worked.
 
-This repository contains the experiment specification and a working **offline evaluator**: JSON contracts, deterministic fills, replica workspaces, Day-20 NLV and median scoring, four non-agent baselines, a frozen session calendar, and a fixture market-data vendor that writes D5 snapshots. There is no live HTTP vendor, no first-party agent CLI runner, and no scored season yet. A shakedown is still required before the project is a serious live benchmark.
+This repository contains the experiment specification and a working **offline evaluator**: JSON contracts, deterministic fills, replica workspaces, Day-20 NLV and median scoring, four non-agent baselines, a frozen session calendar, and a fixture market-data vendor that writes D5 snapshots. First-party agent CLI runners are implemented as adapters; default tests use fake CLIs, and live subscription smokes are opt-in. There is no live HTTP vendor and no scored season yet. A shakedown is still required before the project is a serious live benchmark.
 
 ## What this experiment measures
 
@@ -772,7 +772,7 @@ Profit is an outcome, not the criterion for whether the experiment itself worked
 
 ## Implementation status
 
-The paper exchange, ledger/scorer, workspace publisher, frozen calendar, and fixture vendor exist and are covered by tests (`python -m pytest tests -q`). Agent runners and a wall-clock daemon that waits for 10:00 ET do not.
+The paper exchange, ledger/scorer, workspace publisher, frozen calendar, fixture vendor, and agent runners exist and are covered by tests (`python -m pytest tests -q`). A wall-clock daemon that waits for 10:00 ET does not.
 
 Seriousness still depends on finishing the remaining components and running the three-day shakedown, not on a sharper slogan.
 
@@ -787,7 +787,7 @@ flowchart LR
 
 - **Scheduler:** knows exchange sessions, round times, deadlines, and pauses. Calendar and round-time math exist; a live waiting daemon does not.
 - **Workspace publisher:** writes identical common state and replica-specific portfolio state. Implemented (including checksummed raw vendor bytes).
-- **Agent runners:** launch subscription-authenticated first-party CLIs without LLM API keys. One process tree per replica. **Not started.**
+- **Agent runners:** launch subscription-authenticated first-party CLIs without LLM API keys. One process tree per replica. Implemented for Codex and Grok Build against a shared contract. The default suite uses fake CLIs; live subscription smoke is opt-in and excluded from ordinary pytest.
 - **Paper exchange:** validates sealed decisions and assigns deterministic fills. Implemented.
 - **Ledger/scorer:** records all state transitions and produces the integrity, baseline, process, and P&L reports. Fills, daily marks, NLV, median, and the four non-agent baselines are implemented. Process reports are not.
 
@@ -795,7 +795,7 @@ The provider-specific runner may differ, but it must not interpret or improve an
 
 ### Later control arm (not Season 1)
 
-After the paper exchange and archive work, a second track may put both named models in one thin common harness on the same ledger. That track is the closest this project would come to a model comparison. It is optional, it does not replace the product bake-off, and it is out of scope until Season 1’s evaluator exists.
+After the paper exchange and archive work, a second track may put both named models in one thin common harness on the same ledger. That track is the closest this project would come to a model comparison. It is optional, it does not replace the product bake-off, and it is out of scope until a scored Season 1 exists.
 
 ## Security and safety
 
