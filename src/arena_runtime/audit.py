@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -283,6 +284,7 @@ class AuditArchive:
         if not candidate.is_dir():
             raise AuditArchiveError("root", "must be a directory")
         self._root = candidate
+        self._lock = threading.Lock()
 
     @property
     def root(self) -> Path:
@@ -313,8 +315,9 @@ class AuditArchive:
         target = self.events_path
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            with target.open("ab") as stream:
-                stream.write(event_bytes)
+            with self._lock:
+                with target.open("ab") as stream:
+                    stream.write(event_bytes)
         except OSError as exc:
             raise AuditArchiveError(
                 "events_path",

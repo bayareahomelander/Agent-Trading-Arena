@@ -1,16 +1,24 @@
 """Thin provider-neutral round coordination.
 
-R17 implements the all-product preflight barrier only. It does not publish
-round state, launch runners, or select a commit/void treatment.
+R17 is the all-product preflight barrier. R18 launches every due replica
+concurrently after common state is published and keeps decisions sealed.
 """
 
 from __future__ import annotations
 
+import hashlib
+import re
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Final, Mapping, Sequence
 
+from arena_kernel.schema._dump import dump_json
+from arena_kernel.schema.clock import clock_to_dict
+from arena_kernel.schema.market import bar_to_dict, parse_snapshot
 from arena_kernel.types import format_et_timestamp
+from arena_kernel.workspace import SNAPSHOT_FILE
 from arena_runtime.audit import AUDIT_SCHEMA_VERSION, AuditArchive, parse_audit_event
 from arena_runtime.registration import RuntimeRegistration
 from arena_runtime.runner import (
@@ -18,8 +26,11 @@ from arena_runtime.runner import (
     PreflightResult,
     Runner,
     RunnerRequest,
+    RunnerResult,
     require_matching_identity,
 )
+
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 REPLICA_STATUS_ACTIVE: Final[str] = "active"
 REPLICA_STATUS_INACTIVE: Final[str] = "inactive"
@@ -110,6 +121,125 @@ class PreflightBarrierResult:
                 "reason_codes",
                 "required when the barrier is paused",
             )
+
+
+@dataclass(frozen=True)
+class DecisionBarrierResult:
+    """Sealed runner results collected after every due replica finishes."""
+
+    contract_version: str
+    round_id: str
+    snapshot_checksum: str
+    deadline: datetime
+    results: tuple[RunnerResult, ...]
+
+    def __post_init__(self) -> None:
+        if self.contract_version != RUNNER_CONTRACT_VERSION:
+            raise OrchestratorError(
+                "contract_version",
+                f"must be {RUNNER_CONTRACT_VERSION!r}",
+            )
+        _require_text(self.round_id, path="round_id")
+        _require_checksum(self.snapshot_checksum)
+        if self.deadline.tzinfo is None:
+            raise OrchestratorError("deadline", "must be timezone-aware")
+
+
+def published_snapshot_checksum(workspace: Path) -> str:
+    """Hash the published clock and bars, ignoring the replica book."""
+
+    if not isinstance(workspace, Path):
+        raise OrchestratorError("workspace", "expected a path")
+    snapshot_path = workspace / SNAPSHOT_FILE
+    if not snapshot_path.is_file():
+        raise OrchestratorError(
+            "workspace.snapshot",
+            "published snapshot is missing",
+        )
+    snapshot = parse_snapshot(snapshot_path.read_text(encoding="utf-8"))
+    payload = {
+        "clock": clock_to_dict(snapshot.clock),
+        "bars": [bar_to_dict(bar) for bar in snapshot.bars],
+    }
+    return hashlib.sha256(dump_json(payload).encode("utf-8")).hexdigest()
+
+
+def run_decision_barrier(
+    *,
+    preflight: PreflightBarrierResult,
+    requests: Sequence[RunnerRequest],
+    runners: Mapping[str, Runner],
+    snapshot_checksum: str,
+) -> DecisionBarrierResult:
+    """Launch every due replica concurrently and collect sealed results."""
+
+    if not isinstance(preflight, PreflightBarrierResult):
+        raise OrchestratorError("preflight", "expected PreflightBarrierResult")
+    if not preflight.ready:
+        raise OrchestratorError(
+            "preflight",
+            "paused field must not launch any replica",
+        )
+    _require_checksum(snapshot_checksum)
+    due = tuple(
+        ReplicaDuty(result.product_id, result.replica_id, REPLICA_STATUS_ACTIVE)
+        for result in preflight.preflight_results
+    )
+    if tuple(duty.replica_id for duty in due) != preflight.due_replica_ids:
+        raise OrchestratorError(
+            "preflight.due_replica_ids",
+            "does not match archived due preflight identities",
+        )
+    request_by_replica = _request_index(requests, due)
+    runner_by_product = _runner_index(runners, due)
+    for duty in due:
+        runner = runner_by_product[duty.product_id]
+        if not callable(getattr(runner, "run", None)):
+            raise OrchestratorError(
+                f"runners.{duty.product_id}",
+                "expected a Runner with run",
+            )
+    round_id = _shared_round_id(due, request_by_replica)
+    if round_id != preflight.round_id:
+        raise OrchestratorError(
+            "requests.round_id",
+            "does not match the ready preflight round",
+        )
+    deadline = _shared_deadline(due, request_by_replica)
+    _require_shared_snapshot(due, request_by_replica, snapshot_checksum)
+
+    ordered = list(due)
+
+    def _launch(duty: ReplicaDuty) -> RunnerResult:
+        request = request_by_replica[duty.replica_id]
+        return require_matching_identity(
+            request,
+            runner_by_product[duty.product_id].run(request),
+        )
+
+    collected: dict[str, RunnerResult] = {}
+    first_error: BaseException | None = None
+    with ThreadPoolExecutor(max_workers=max(len(ordered), 1)) as pool:
+        futures = {pool.submit(_launch, duty): duty for duty in ordered}
+        wait(futures)
+        for future, duty in futures.items():
+            try:
+                collected[duty.replica_id] = future.result()
+            except BaseException as exc:  # noqa: BLE001 - wait for every worker
+                if first_error is None:
+                    first_error = exc
+    if first_error is not None:
+        raise OrchestratorError(
+            "run",
+            "a due replica failed before the decision barrier closed",
+        ) from first_error
+    return DecisionBarrierResult(
+        contract_version=RUNNER_CONTRACT_VERSION,
+        round_id=round_id,
+        snapshot_checksum=snapshot_checksum,
+        deadline=deadline,
+        results=tuple(collected[duty.replica_id] for duty in ordered),
+    )
 
 
 def preflight_round(
@@ -341,3 +471,39 @@ def _append_pause(
 def _require_text(value: object, *, path: str) -> None:
     if not isinstance(value, str) or not value or value.strip() != value:
         raise OrchestratorError(path, "must be a non-empty string without padding")
+
+
+def _require_checksum(value: object) -> None:
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise OrchestratorError(
+            "snapshot_checksum",
+            "must be a lowercase SHA-256 hex digest",
+        )
+
+
+def _shared_deadline(
+    due: Sequence[ReplicaDuty],
+    requests: Mapping[str, RunnerRequest],
+) -> datetime:
+    deadline = requests[due[0].replica_id].deadline
+    for duty in due:
+        if requests[duty.replica_id].deadline != deadline:
+            raise OrchestratorError(
+                "requests.deadline",
+                "every due replica must share the same absolute deadline",
+            )
+    return deadline
+
+
+def _require_shared_snapshot(
+    due: Sequence[ReplicaDuty],
+    requests: Mapping[str, RunnerRequest],
+    snapshot_checksum: str,
+) -> None:
+    for duty in due:
+        observed = published_snapshot_checksum(requests[duty.replica_id].workspace)
+        if observed != snapshot_checksum:
+            raise OrchestratorError(
+                "snapshot_checksum",
+                "published snapshot does not match the shared checksum",
+            )

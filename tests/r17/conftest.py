@@ -79,6 +79,7 @@ def script_for(
         preflight_ready=ready,
         preflight_failure_reason=failure_reason,
         outcome="completed",
+        session_reference=f"session-{replica_id}",
     )
 
 

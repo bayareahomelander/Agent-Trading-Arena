@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Final, Sequence
+import threading
 
 from arena_kernel.types import format_et_timestamp
 from arena_runtime.audit import AuditArchive, parse_audit_event
@@ -114,108 +115,111 @@ class FakeRunner:
         self._sessions_by_replica: dict[tuple[str, str], str] = {}
         self._replica_by_session: dict[str, tuple[str, str]] = {}
         self._completed_requests: set[tuple[str, str, str]] = set()
+        self._lock = threading.Lock()
 
     def preflight(self, request: RunnerRequest) -> PreflightResult:
         """Return scripted readiness and emit the normalized preflight pair."""
 
-        script = self._script_for(request)
-        result = PreflightResult(
-            contract_version=RUNNER_CONTRACT_VERSION,
-            product_id=request.product_id,
-            replica_id=request.replica_id,
-            round_id=request.round_id,
-            ready=script.preflight_ready,
-            started_at=script.preflight_started_at,
-            finished_at=script.preflight_finished_at,
-            failure_reason=script.preflight_failure_reason,
-        )
-        require_matching_identity(request, result)
-        self._append_audit(
-            request,
-            event_type="preflight_started",
-            timestamp=script.preflight_started_at,
-            payload={},
-        )
-        self._append_audit(
-            request,
-            event_type="preflight_completed",
-            timestamp=script.preflight_finished_at,
-            payload={
-                "ready": result.ready,
-                "failure_reason": result.failure_reason,
-            },
-        )
-        return result
+        with self._lock:
+            script = self._script_for(request)
+            result = PreflightResult(
+                contract_version=RUNNER_CONTRACT_VERSION,
+                product_id=request.product_id,
+                replica_id=request.replica_id,
+                round_id=request.round_id,
+                ready=script.preflight_ready,
+                started_at=script.preflight_started_at,
+                finished_at=script.preflight_finished_at,
+                failure_reason=script.preflight_failure_reason,
+            )
+            require_matching_identity(request, result)
+            self._append_audit(
+                request,
+                event_type="preflight_started",
+                timestamp=script.preflight_started_at,
+                payload={},
+            )
+            self._append_audit(
+                request,
+                event_type="preflight_completed",
+                timestamp=script.preflight_finished_at,
+                payload={
+                    "ready": result.ready,
+                    "failure_reason": result.failure_reason,
+                },
+            )
+            return result
 
     def run(self, request: RunnerRequest) -> RunnerResult:
         """Run one script, optionally writing its exact decision bytes."""
 
-        script = self._script_for(request)
-        key = _identity_key(request.product_id, request.replica_id, request.round_id)
-        if key in self._completed_requests:
-            raise FakeRunnerError("round_id", "script has already run")
-        self._validate_incoming_session(request)
-        self._validate_outgoing_session(request, script.session_reference)
-        self._append_audit(
-            request,
-            event_type="replica_launched",
-            timestamp=script.run_started_at,
-            payload={
-                "deadline": format_et_timestamp(request.deadline),
-                "session_reference": request.session_reference,
-            },
-        )
-
-        decision_checksum = self._write_decision(request, script.decision_bytes)
-        decision_present = script.decision_bytes is not None
-
-        if script.outcome == "timeout":
+        with self._lock:
+            script = self._script_for(request)
+            key = _identity_key(request.product_id, request.replica_id, request.round_id)
+            if key in self._completed_requests:
+                raise FakeRunnerError("round_id", "script has already run")
+            self._validate_incoming_session(request)
+            self._validate_outgoing_session(request, script.session_reference)
             self._append_audit(
                 request,
-                event_type="replica_terminated",
-                timestamp=script.run_finished_at,
+                event_type="replica_launched",
+                timestamp=script.run_started_at,
                 payload={
-                    "reason": "deadline",
-                    "exit_status": script.exit_status,
+                    "deadline": format_et_timestamp(request.deadline),
+                    "session_reference": request.session_reference,
                 },
             )
 
-        self._append_audit(
-            request,
-            event_type="decision_collected",
-            timestamp=script.run_finished_at,
-            payload={
-                "decision_present": decision_present,
-                "decision_checksum": decision_checksum,
-            },
-        )
-        result = RunnerResult(
-            contract_version=RUNNER_CONTRACT_VERSION,
-            product_id=request.product_id,
-            replica_id=request.replica_id,
-            round_id=request.round_id,
-            outcome=script.outcome,
-            started_at=script.run_started_at,
-            finished_at=script.run_finished_at,
-            exit_status=script.exit_status,
-            decision_present=decision_present,
-            decision_checksum=decision_checksum,
-            session_reference=script.session_reference,
-        )
-        require_matching_identity(request, result)
-        self._register_outgoing_session(request, result.session_reference)
-        self._append_audit(
-            request,
-            event_type="replica_completed",
-            timestamp=script.run_finished_at,
-            payload={
-                "outcome": result.outcome,
-                "exit_status": result.exit_status,
-                "session_reference": result.session_reference,
-            },
-        )
-        self._completed_requests.add(key)
-        return result
+            decision_checksum = self._write_decision(request, script.decision_bytes)
+            decision_present = script.decision_bytes is not None
+
+            if script.outcome == "timeout":
+                self._append_audit(
+                    request,
+                    event_type="replica_terminated",
+                    timestamp=script.run_finished_at,
+                    payload={
+                        "reason": "deadline",
+                        "exit_status": script.exit_status,
+                    },
+                )
+
+            self._append_audit(
+                request,
+                event_type="decision_collected",
+                timestamp=script.run_finished_at,
+                payload={
+                    "decision_present": decision_present,
+                    "decision_checksum": decision_checksum,
+                },
+            )
+            result = RunnerResult(
+                contract_version=RUNNER_CONTRACT_VERSION,
+                product_id=request.product_id,
+                replica_id=request.replica_id,
+                round_id=request.round_id,
+                outcome=script.outcome,
+                started_at=script.run_started_at,
+                finished_at=script.run_finished_at,
+                exit_status=script.exit_status,
+                decision_present=decision_present,
+                decision_checksum=decision_checksum,
+                session_reference=script.session_reference,
+            )
+            require_matching_identity(request, result)
+            self._register_outgoing_session(request, result.session_reference)
+            self._append_audit(
+                request,
+                event_type="replica_completed",
+                timestamp=script.run_finished_at,
+                payload={
+                    "outcome": result.outcome,
+                    "exit_status": result.exit_status,
+                    "session_reference": result.session_reference,
+                },
+            )
+            self._completed_requests.add(key)
+            return result
 
     def _script_for(self, request: RunnerRequest) -> FakeRunnerScript:
         if not isinstance(request, RunnerRequest):

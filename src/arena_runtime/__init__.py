@@ -101,10 +101,13 @@ from arena_runtime.orchestrator import (
     REPLICA_STATUS_DQ_REFUSAL,
     REPLICA_STATUS_INACTIVE,
     SHARED_PREFLIGHT_FAILURES,
+    DecisionBarrierResult,
     OrchestratorError,
     PreflightBarrierResult,
     ReplicaDuty,
     preflight_round,
+    published_snapshot_checksum,
+    run_decision_barrier,
 )
 from arena_runtime.vocabulary import STABLE_TERMS
 
@@ -157,6 +160,7 @@ __all__ = [
     "COMMON_DATA_AVAILABLE",
     "COMMON_DATA_UNAVAILABLE",
     "COMMON_DATA_UNAVAILABLE_REASON",
+    "DecisionBarrierResult",
     "OrchestratorError",
     "PreflightBarrierResult",
     "REPLICA_STATUS_ACTIVE",
@@ -165,6 +169,8 @@ __all__ = [
     "ReplicaDuty",
     "SHARED_PREFLIGHT_FAILURES",
     "preflight_round",
+    "published_snapshot_checksum",
+    "run_decision_barrier",
     "PreflightResult",
     "ProcessFacts",
     "ProcessSupervisorError",
