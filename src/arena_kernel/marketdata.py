@@ -13,7 +13,7 @@ import json
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Final, Mapping, Sequence
+from typing import Any, Final, Mapping, Protocol, Sequence, runtime_checkable
 
 from arena_kernel.calendar import (
     Calendar,
@@ -56,6 +56,20 @@ TAPE_BARS_FILE: Final[str] = "bars.json"
 
 class CommonDataUnavailable(FieldError):
     """Vendor cannot supply the common snapshot; no fills."""
+
+
+@runtime_checkable
+class Vendor(Protocol):
+    """Minute bars and official closes. HTTP does not live here."""
+
+    def minute_bars(
+        self,
+        symbols: Sequence[str],
+        start: datetime,
+        end: datetime,
+    ) -> tuple[Mapping[str, Any], ...]: ...
+
+    def official_closes(self, session_date: date) -> dict[str, Decimal]: ...
 
 
 class FixtureVendor:
@@ -153,7 +167,7 @@ class FixtureVendor:
 
 
 def bars_at_reference(
-    vendor: FixtureVendor,
+    vendor: Vendor,
     symbols: Sequence[str],
     reference_minute: datetime,
 ) -> tuple[Bar, ...]:
@@ -264,7 +278,7 @@ def publish_round(
 def build_tape(
     out_dir: Path | str,
     calendar: Calendar,
-    vendor: FixtureVendor,
+    vendor: Vendor,
     universe: Sequence[str],
     session_dates: Sequence[date],
     starter_portfolio: Portfolio,
@@ -401,7 +415,7 @@ def _write_hold_decisions(
 
 def _close_json(
     calendar: Calendar,
-    vendor: FixtureVendor,
+    vendor: Vendor,
     session_date: date,
     symbols: Sequence[str],
 ) -> str:
