@@ -13,7 +13,7 @@ import json
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Final, Mapping, Protocol, Sequence, runtime_checkable
+from typing import Any, Final, Mapping, Sequence
 
 from arena_kernel.calendar import (
     Calendar,
@@ -32,7 +32,7 @@ from arena_kernel.schema._parse import (
     require_schema_version,
 )
 from arena_kernel.schema.clock import dump_clock
-from arena_kernel.schema.errors import SchemaError
+from arena_kernel.schema.errors import FieldError, SchemaError
 from arena_kernel.schema.fills import FillsFile
 from arena_kernel.schema.market import Bar, Snapshot, bar_to_dict, parse_bar
 from arena_kernel.schema.portfolio import Portfolio, dump_portfolio
@@ -45,19 +45,6 @@ from arena_kernel.types import (
 )
 from arena_kernel.workspace import write_replica_workspace
 
-# Locked C1 terms. Meanings are names, not implementations.
-MARKETDATA_TERMS: Final[tuple[str, ...]] = (
-    "vendor",
-    "common_data_unavailable",
-)
-
-MARKETDATA_MEANINGS: Final[Mapping[str, str]] = {
-    "vendor": "The single frozen market-data source for a tape",
-    "common_data_unavailable": (
-        "Vendor cannot supply the common snapshot; no fills"
-    ),
-}
-
 _BARS_FILE: Final[str] = "bars.json"
 _CLOSES_FILE: Final[str] = "closes.json"
 TAPE_ROUNDS_DIR: Final[str] = "rounds"
@@ -67,27 +54,8 @@ TAPE_CLOCK_FILE: Final[str] = "clock.json"
 TAPE_BARS_FILE: Final[str] = "bars.json"
 
 
-class CommonDataUnavailable(ValueError):
+class CommonDataUnavailable(FieldError):
     """Vendor cannot supply the common snapshot; no fills."""
-
-    def __init__(self, path: str, message: str) -> None:
-        self.path = path
-        self.message = message
-        super().__init__(f"{path}: {message}")
-
-
-@runtime_checkable
-class Vendor(Protocol):
-    """Single frozen market-data source for a tape. No HTTP in tests."""
-
-    def minute_bars(
-        self,
-        symbols: Sequence[str],
-        start: datetime,
-        end: datetime,
-    ) -> tuple[Mapping[str, Any], ...]: ...
-
-    def official_closes(self, session_date: date) -> Mapping[str, Decimal]: ...
 
 
 class FixtureVendor:
@@ -185,7 +153,7 @@ class FixtureVendor:
 
 
 def bars_at_reference(
-    vendor: Vendor,
+    vendor: FixtureVendor,
     symbols: Sequence[str],
     reference_minute: datetime,
 ) -> tuple[Bar, ...]:
@@ -296,7 +264,7 @@ def publish_round(
 def build_tape(
     out_dir: Path | str,
     calendar: Calendar,
-    vendor: Vendor,
+    vendor: FixtureVendor,
     universe: Sequence[str],
     session_dates: Sequence[date],
     starter_portfolio: Portfolio,
@@ -433,7 +401,7 @@ def _write_hold_decisions(
 
 def _close_json(
     calendar: Calendar,
-    vendor: Vendor,
+    vendor: FixtureVendor,
     session_date: date,
     symbols: Sequence[str],
 ) -> str:

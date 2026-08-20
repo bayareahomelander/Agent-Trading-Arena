@@ -11,18 +11,18 @@ import hashlib
 import json
 import re
 import shutil
-import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final, Mapping, Sequence
 
+from arena_kernel.schema.errors import FieldError
 from arena_runtime.audit import (
-    AUDIT_SCHEMA_VERSION,
     AuditArchive,
     ProviderArtifactReference,
-    parse_audit_event,
+    append_runner_event,
 )
+from arena_runtime.session import SessionStore, require_session_reference
 from arena_runtime.isolation import (
     ReplicaLaunch,
     resolve_replica_path,
@@ -74,10 +74,6 @@ _REQUIRED_EXEC_CAPABILITIES: Final[tuple[str, ...]] = (
     "--strict-config",
     "resume",
 )
-_SESSION_SCHEMA_VERSION: Final[str] = "1"
-_SESSION_LOCKS: dict[Path, threading.Lock] = {}
-_SESSION_LOCKS_GUARD = threading.Lock()
-
 CODEX_QUOTA_ERROR_CODES: Final[frozenset[str]] = frozenset(
     {
         "quota_exceeded",
@@ -125,16 +121,11 @@ _ERROR_CODE_KEYS: Final[frozenset[str]] = frozenset(
 )
 
 
-class CodexPreflightError(ValueError):
+class CodexPreflightError(FieldError):
     """Invalid Codex adapter setup with a stable field path."""
 
-    def __init__(self, path: str, message: str) -> None:
-        self.path = path
-        self.message = message
-        super().__init__(f"{path}: {message}")
 
-
-class CodexExecutionError(ValueError):
+class CodexExecutionError(FieldError):
     """Raw fresh-run failure whose provider meaning remains deferred to R12."""
 
     def __init__(
@@ -146,151 +137,21 @@ class CodexExecutionError(ValueError):
         decision_checksum: str | None = None,
         artifact_references: tuple[str, ...] = (),
     ) -> None:
-        self.path = path
-        self.message = message
+        super().__init__(path, message)
         self.facts = facts
         self.decision_checksum = decision_checksum
         self.artifact_references = artifact_references
-        super().__init__(f"{path}: {message}")
 
 
-class CodexSessionError(ValueError):
+class CodexSessionError(FieldError):
     """Missing, corrupt, ambiguous, or cross-replica Codex session state."""
 
-    def __init__(self, path: str, message: str) -> None:
-        self.path = path
-        self.message = message
-        super().__init__(f"{path}: {message}")
 
-
-class CodexSessionStore:
+class CodexSessionStore(SessionStore):
     """Immutable one-to-one Codex session references outside agent workspaces."""
 
     def __init__(self, root: Path | str) -> None:
-        if not isinstance(root, (Path, str)):
-            raise CodexSessionError("session_store", "expected a path")
-        resolved = Path(root).resolve(strict=False)
-        try:
-            resolved.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise CodexSessionError(
-                "session_store",
-                f"cannot create session store: {exc}",
-            ) from exc
-        if not resolved.is_dir():
-            raise CodexSessionError("session_store", "must be a directory")
-        self._root = resolved
-        with _SESSION_LOCKS_GUARD:
-            self._lock = _SESSION_LOCKS.setdefault(resolved, threading.Lock())
-
-    @property
-    def root(self) -> Path:
-        return self._root
-
-    def record_path(self, product_id: str, replica_id: str) -> Path:
-        _store_segment(product_id, path="product_id")
-        _store_segment(replica_id, path="replica_id")
-        return (self._root / product_id / f"{replica_id}.json").resolve(strict=False)
-
-    def save(
-        self,
-        product_id: str,
-        replica_id: str,
-        session_reference: str,
-    ) -> Path:
-        reference = _session_reference(session_reference)
-        target = self.record_path(product_id, replica_id)
-        payload = {
-            "schema_version": _SESSION_SCHEMA_VERSION,
-            "product_id": product_id,
-            "replica_id": replica_id,
-            "session_reference": reference,
-        }
-        data = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
-        with self._lock:
-            for record in self._root.rglob("*.json"):
-                stored = self._load_path(record)
-                if stored["session_reference"] == reference and record != target:
-                    raise CodexSessionError(
-                        "session_reference",
-                        "is already mapped to another product or replica",
-                    )
-            if target.exists():
-                stored = self._load_path(target)
-                if stored != payload:
-                    raise CodexSessionError(
-                        "session_reference",
-                        "replica already has a different stored session",
-                    )
-                return target
-            try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with target.open("xb") as stream:
-                    stream.write(data)
-            except FileExistsError:
-                stored = self._load_path(target)
-                if stored != payload:
-                    raise CodexSessionError(
-                        "session_reference",
-                        "replica session was concurrently replaced",
-                    )
-            except OSError as exc:
-                raise CodexSessionError(
-                    "session_store",
-                    f"cannot persist session reference: {exc}",
-                ) from exc
-        return target
-
-    def load(self, product_id: str, replica_id: str) -> str:
-        target = self.record_path(product_id, replica_id)
-        with self._lock:
-            if not target.is_file():
-                raise CodexSessionError(
-                    "session_reference",
-                    "stored session is missing for this replica",
-                )
-            return str(self._load_path(target)["session_reference"])
-
-    def _load_path(self, path: Path) -> dict[str, str]:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise CodexSessionError(
-                "session_reference",
-                "stored session record is corrupt",
-            ) from exc
-        required = {
-            "schema_version",
-            "product_id",
-            "replica_id",
-            "session_reference",
-        }
-        if not isinstance(payload, dict) or set(payload) != required:
-            raise CodexSessionError(
-                "session_reference",
-                "stored session record has an invalid shape",
-            )
-        for key in required:
-            if not isinstance(payload[key], str):
-                raise CodexSessionError(
-                    "session_reference",
-                    f"stored session field {key!r} is invalid",
-                )
-        if payload["schema_version"] != _SESSION_SCHEMA_VERSION:
-            raise CodexSessionError(
-                "session_reference",
-                "stored session schema version is unsupported",
-            )
-        _store_segment(payload["product_id"], path="product_id")
-        _store_segment(payload["replica_id"], path="replica_id")
-        _session_reference(payload["session_reference"])
-        expected = self.record_path(payload["product_id"], payload["replica_id"])
-        if expected != path.resolve(strict=False):
-            raise CodexSessionError(
-                "session_reference",
-                "stored session identity does not match its path",
-            )
-        return {key: str(payload[key]) for key in required}
+        super().__init__(root, error_cls=CodexSessionError)
 
 
 @dataclass(frozen=True)
@@ -1034,22 +895,16 @@ class CodexAdapter:
         payload: dict[str, object],
         artifacts: Sequence[ProviderArtifactReference],
     ) -> None:
-        event = parse_audit_event(
-            {
-                "schema_version": AUDIT_SCHEMA_VERSION,
-                "type": event_type,
-                "product_id": request.product_id,
-                "replica_id": request.replica_id,
-                "round_id": request.round_id,
-                "timestamp": timestamp.isoformat(),
-                "payload": payload,
-                "provider_artifacts": [
-                    {"path": item.path, "checksum": item.checksum}
-                    for item in artifacts
-                ],
-            }
+        append_runner_event(
+            self._archive,
+            event_type=event_type,
+            product_id=request.product_id,
+            replica_id=request.replica_id,
+            round_id=request.round_id,
+            timestamp=timestamp,
+            payload=payload,
+            artifacts=artifacts,
         )
-        self._archive.append_event(event)
 
     def _artifact_path(self, request: RunnerRequest, name: str) -> str:
         return (
@@ -1183,7 +1038,7 @@ def _parse_codex_jsonl(value: bytes) -> tuple[Mapping[str, Any], ...] | None:
 
 def _optional_thread_reference(events: Sequence[Mapping[str, Any]]) -> str | None:
     references = [
-        _session_reference(event.get("thread_id"))
+        require_session_reference(event.get("thread_id"), error_cls=CodexSessionError)
         for event in events
         if event.get("type") == "thread.started"
     ]
@@ -1250,21 +1105,3 @@ def _boolean_value(value: object) -> bool | None:
 def _safe_segment(value: str, *, path: str) -> None:
     if value in {".", ".."} or "/" in value or "\\" in value:
         raise CodexPreflightError(path, "must be one safe path segment")
-
-
-def _session_reference(value: object) -> str:
-    if not isinstance(value, str) or not value or value.strip() != value:
-        raise CodexSessionError(
-            "session_reference",
-            "must be a non-empty opaque string without padding",
-        )
-    if "\x00" in value:
-        raise CodexSessionError("session_reference", "must not contain NUL")
-    return value
-
-
-def _store_segment(value: str, *, path: str) -> None:
-    try:
-        _safe_segment(value, path=path)
-    except CodexPreflightError as exc:
-        raise CodexSessionError(exc.path, exc.message) from exc

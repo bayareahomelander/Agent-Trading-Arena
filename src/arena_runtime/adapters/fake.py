@@ -14,7 +14,8 @@ from typing import Final, Sequence
 import threading
 
 from arena_kernel.types import format_et_timestamp
-from arena_runtime.audit import AuditArchive, parse_audit_event
+from arena_kernel.schema.errors import FieldError
+from arena_runtime.audit import AuditArchive, append_runner_event
 from arena_runtime.runner import (
     RUNNER_CONTRACT_VERSION,
     PreflightResult,
@@ -27,13 +28,8 @@ from arena_runtime.runner import (
 OUTBOX_DECISION_PATH: Final[str] = "outbox/decision.json"
 
 
-class FakeRunnerError(ValueError):
+class FakeRunnerError(FieldError):
     """Invalid or unavailable fake script with a stable field path."""
-
-    def __init__(self, path: str, message: str) -> None:
-        self.path = path
-        self.message = message
-        super().__init__(f"{path}: {message}")
 
 
 @dataclass(frozen=True)
@@ -315,19 +311,15 @@ class FakeRunner:
         timestamp: datetime,
         payload: dict[str, object],
     ) -> None:
-        event = parse_audit_event(
-            {
-                "schema_version": "1",
-                "type": event_type,
-                "product_id": request.product_id,
-                "replica_id": request.replica_id,
-                "round_id": request.round_id,
-                "timestamp": format_et_timestamp(timestamp),
-                "payload": payload,
-                "provider_artifacts": [],
-            }
+        append_runner_event(
+            self._archive,
+            event_type=event_type,
+            product_id=request.product_id,
+            replica_id=request.replica_id,
+            round_id=request.round_id,
+            timestamp=timestamp,
+            payload=payload,
         )
-        self._archive.append_event(event)
 
 
 def _identity_key(product_id: str, replica_id: str, round_id: str) -> tuple[str, str, str]:

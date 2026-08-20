@@ -7,13 +7,12 @@ filesystem access, process launch, provider logic, or trading interpretation.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Final, Protocol, runtime_checkable
 
-from arena_kernel.schema.errors import SchemaError
+from arena_kernel.schema.errors import FieldError, SchemaError
 from arena_kernel.schema.round_id import parse_round_id
 
 RUNNER_CONTRACT_VERSION: Final[str] = "1"
@@ -28,16 +27,20 @@ RUNNER_OUTCOMES: Final[tuple[str, ...]] = (
     "runner_error",
 )
 
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+def is_sha256_hex(value: object) -> bool:
+    """True when value is a 64-character lowercase SHA-256 hex digest."""
+
+    if not isinstance(value, str) or len(value) != 64 or value != value.lower():
+        return False
+    try:
+        return len(bytes.fromhex(value)) == 32
+    except ValueError:
+        return False
 
 
-class RunnerContractError(ValueError):
+class RunnerContractError(FieldError):
     """Invalid runner contract value with a stable field path."""
-
-    def __init__(self, path: str, message: str) -> None:
-        self.path = path
-        self.message = message
-        super().__init__(f"{path}: {message}")
 
 
 @dataclass(frozen=True)
@@ -247,7 +250,7 @@ def _require_timestamp_range(started_at: datetime, finished_at: datetime) -> Non
 
 def _require_decision_checksum(*, present: bool, checksum: str | None) -> None:
     if present:
-        if not isinstance(checksum, str) or _SHA256.fullmatch(checksum) is None:
+        if not is_sha256_hex(checksum):
             raise RunnerContractError(
                 "decision_checksum",
                 "must be a lowercase SHA-256 hex digest when decision is present",

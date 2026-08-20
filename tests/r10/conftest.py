@@ -15,7 +15,7 @@ from arena_runtime.isolation import prepare_replica_launch
 from arena_runtime.registration import RuntimeCapabilities, RuntimeRegistration
 from arena_runtime.runner import RUNNER_CONTRACT_VERSION, RunnerRequest
 
-FAKE_CODEX = Path(__file__).parent / "fixtures" / "fake_codex.py"
+FAKE_CODEX = Path(__file__).resolve().parents[1] / "fixtures" / "fake_codex.py"
 EXPECTED_VERSION = "0.144.5"
 EXPECTED_MODEL = "registered-codex-model"
 EXPECTED_REASONING = "high"
@@ -65,8 +65,6 @@ def make_case(
     (workspace / "RULES.md").write_text("rules\n", encoding="utf-8")
     (workspace / "PROMPT.md").write_text("prompt\n", encoding="utf-8")
     (workspace / "state" / "portfolio.json").write_text('{}\n', encoding="utf-8")
-    credential_store = root / "codex-credentials"
-    credential_store.mkdir()
     host_environment: dict[str, str] = {}
     for key in ("PATH", "PATHEXT", "SystemRoot", "TEMP", "TMP", "WINDIR"):
         value = os.environ.get(key)
@@ -75,7 +73,6 @@ def make_case(
     launch = prepare_replica_launch(
         season.resolve(),
         "codex-product-1",
-        credential_store=credential_store.resolve(),
         host_environment=host_environment,
     )
     registration = RuntimeRegistration(

@@ -7,16 +7,19 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import ROUND_HALF_EVEN, Decimal
+from typing import Sequence
 
 from arena_kernel.pricing import CannotFill, reference_and_fill_price
 from arena_kernel.schema.decision import Decision, Order
 from arena_kernel.schema.events import (
     LedgerEvent,
+    OrderFilledPayload,
     make_decision_accepted,
     make_decision_missing,
     make_order_filled,
     make_order_rejected,
 )
+from arena_kernel.schema.fills import FillsFile, PriorFill
 from arena_kernel.schema.market import Bar, Snapshot
 from arena_kernel.schema.portfolio import Portfolio, Position
 from arena_kernel.types import FILL_PRICE_QUANTUM, floor_to_0_001, round_cash
@@ -28,6 +31,29 @@ REASON_BUY_QTY_ZERO = "buy_quantity_zero"
 REASON_BUY_NOTIONAL = "buy_notional_not_positive"
 REASON_SELL_QUANTITY = "sell_quantity_not_positive"
 REASON_SYMBOL_MISMATCH = "symbol_mismatch"
+
+
+def extend_fills(book: FillsFile, events: Sequence[LedgerEvent]) -> FillsFile:
+    """Append order_filled facts onto a fills book. Matching does not read fills."""
+
+    extra: list[PriorFill] = []
+    for event in events:
+        payload = event.payload
+        if not isinstance(payload, OrderFilledPayload) or event.round_id is None:
+            continue
+        extra.append(
+            PriorFill(
+                fill_id=payload.fill_id,
+                round_id=event.round_id,
+                symbol=payload.symbol,
+                side=payload.side,
+                quantity=payload.quantity,
+                fill_price=payload.fill_price,
+                notional_usd=payload.notional_usd,
+                filled_at=event.timestamp,
+            )
+        )
+    return FillsFile(schema_version=book.schema_version, fills=book.fills + tuple(extra))
 
 
 def apply_decision(

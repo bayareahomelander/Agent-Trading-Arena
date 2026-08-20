@@ -13,7 +13,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "isolation_fixture.py"
 def make_season(
     root: Path,
     replica_ids: tuple[str, ...] = ("product-a-1", "product-a-2"),
-) -> tuple[Path, Path]:
+) -> Path:
     season = root / "season"
     for replica_id in replica_ids:
         workspace = season / "replicas" / replica_id
@@ -28,9 +28,7 @@ def make_season(
             '{}\n',
             encoding="utf-8",
         )
-    credential_store = root / "provider-credentials"
-    credential_store.mkdir()
-    return season.resolve(), credential_store.resolve()
+    return season.resolve()
 
 
 def sanitized_host_environment() -> dict[str, str]:

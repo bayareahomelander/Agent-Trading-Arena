@@ -33,25 +33,6 @@ from arena_kernel.types import (
     parse_et_timestamp,
 )
 
-# Locked C1 terms. Meanings are names, not implementations.
-CALENDAR_TERMS: Final[tuple[str, ...]] = (
-    "trading_day",
-    "holiday",
-    "scheduled_close",
-    "reference_minute",
-)
-
-CALENDAR_MEANINGS: Final[Mapping[str, str]] = {
-    "trading_day": "Calendar date with a regular or early-close session",
-    "holiday": "Calendar date with no session and no rounds",
-    "scheduled_close": (
-        "Official end of that session (16:00 regular; earlier on early-close days)"
-    ),
-    "reference_minute": (
-        "First complete eligible one-minute bar after the round deadline"
-    ),
-}
-
 CALENDAR_KINDS: Final[tuple[str, ...]] = ("regular", "early_close", "holiday")
 SESSION_KINDS: Final[frozenset[str]] = frozenset({"regular", "early_close"})
 

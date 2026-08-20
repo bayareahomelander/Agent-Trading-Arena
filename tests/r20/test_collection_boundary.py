@@ -2,7 +2,7 @@
 
 import inspect
 
-from arena_runtime import orchestrator
+import arena_runtime.orchestrator as orchestrator
 from arena_runtime.orchestrator import collect_sealed_decisions
 
 

@@ -22,11 +22,9 @@ PROVIDER_OUTPUT = b"".join(
 
 def audit_event(event_type: str = "commit_started") -> AuditEvent:
     round_scoped = event_type in {
-        "round_disposition_selected",
         "commit_started",
         "commit_completed",
         "pause",
-        "operator_intervention",
     }
     payloads: dict[str, dict[str, Any]] = {
         "preflight_completed": {"ready": True, "failure_reason": None},

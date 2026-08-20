@@ -20,7 +20,7 @@ from arena_runtime.isolation import prepare_replica_launch
 from arena_runtime.registration import RuntimeCapabilities, RuntimeRegistration
 from arena_runtime.runner import RUNNER_CONTRACT_VERSION, RunnerRequest
 
-FAKE_CODEX = Path(__file__).parent / "fixtures" / "fake_codex.py"
+FAKE_CODEX = Path(__file__).resolve().parents[1] / "fixtures" / "fake_codex.py"
 EXPECTED_VERSION = "0.144.5"
 EXPECTED_MODEL = "registered-codex-model"
 EXPECTED_REASONING = "high"
@@ -143,12 +143,9 @@ def build_adapter(
 ) -> tuple[CodexAdapter, Path, Path]:
     season = root / "season"
     workspace = create_workspace(season, replica_id)
-    credentials = root / f"credentials-{replica_id}"
-    credentials.mkdir()
     launch = prepare_replica_launch(
         season.resolve(),
         replica_id,
-        credential_store=credentials.resolve(),
         host_environment=host_environment(),
     )
     scenario_payload = scenario(

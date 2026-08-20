@@ -41,51 +41,26 @@ def test_broad_or_traversing_replica_id_is_rejected(
     tmp_path: Path,
     replica_id: str,
 ) -> None:
-    season, credentials = make_season(tmp_path)
+    season = make_season(tmp_path)
 
     with pytest.raises(IsolationError) as exc:
         prepare_replica_launch(
             season,
             replica_id,
-            credential_store=credentials,
             host_environment=sanitized_host_environment(),
         )
 
     assert exc.value.path == "replica_id"
 
 
-@pytest.mark.parametrize("location", ["workspace", "season"])
-def test_credential_store_must_be_outside_season_and_workspace(
-    tmp_path: Path,
-    location: str,
-) -> None:
-    season, _ = make_season(tmp_path)
-    if location == "workspace":
-        credentials = season / "replicas" / "product-a-1" / "agent"
-    else:
-        credentials = season / "provider-credentials"
-        credentials.mkdir()
-
-    with pytest.raises(IsolationError) as exc:
-        prepare_replica_launch(
-            season,
-            "product-a-1",
-            credential_store=credentials,
-            host_environment=sanitized_host_environment(),
-        )
-
-    assert exc.value.path == "credential_store"
-
-
 def test_missing_workspace_contract_path_is_rejected(tmp_path: Path) -> None:
-    season, credentials = make_season(tmp_path)
+    season = make_season(tmp_path)
     (season / "replicas" / "product-a-1" / "PROMPT.md").unlink()
 
     with pytest.raises(IsolationError) as exc:
         prepare_replica_launch(
             season,
             "product-a-1",
-            credential_store=credentials,
             host_environment=sanitized_host_environment(),
         )
 
@@ -93,14 +68,13 @@ def test_missing_workspace_contract_path_is_rejected(tmp_path: Path) -> None:
 
 
 def test_unexpected_top_level_workspace_path_is_rejected(tmp_path: Path) -> None:
-    season, credentials = make_season(tmp_path)
+    season = make_season(tmp_path)
     (season / "replicas" / "product-a-1" / "extra").mkdir()
 
     with pytest.raises(IsolationError) as exc:
         prepare_replica_launch(
             season,
             "product-a-1",
-            credential_store=credentials,
             host_environment=sanitized_host_environment(),
         )
 
@@ -108,7 +82,7 @@ def test_unexpected_top_level_workspace_path_is_rejected(tmp_path: Path) -> None
 
 
 def test_symlinked_workspace_is_rejected(tmp_path: Path) -> None:
-    season, credentials = make_season(tmp_path, replica_ids=("product-a-2",))
+    season = make_season(tmp_path, replica_ids=("product-a-2",))
     external = tmp_path / "external-workspace"
     external.mkdir()
     link = season / "replicas" / "product-a-1"
@@ -118,7 +92,6 @@ def test_symlinked_workspace_is_rejected(tmp_path: Path) -> None:
         prepare_replica_launch(
             season,
             "product-a-1",
-            credential_store=credentials,
             host_environment=sanitized_host_environment(),
         )
 
@@ -126,7 +99,7 @@ def test_symlinked_workspace_is_rejected(tmp_path: Path) -> None:
 
 
 def test_internal_symlink_escape_is_rejected(tmp_path: Path) -> None:
-    season, credentials = make_season(tmp_path)
+    season = make_season(tmp_path)
     external = tmp_path / "external"
     external.mkdir()
     link = season / "replicas" / "product-a-1" / "agent" / "notes" / "outside"
@@ -136,7 +109,6 @@ def test_internal_symlink_escape_is_rejected(tmp_path: Path) -> None:
         prepare_replica_launch(
             season,
             "product-a-1",
-            credential_store=credentials,
             host_environment=sanitized_host_environment(),
         )
 

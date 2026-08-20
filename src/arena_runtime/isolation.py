@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Final, Iterator, Mapping, Sequence
 
+from arena_kernel.schema.errors import FieldError
 from arena_runtime.audit import validate_audit_environment
 from arena_runtime.process import (
     DEFAULT_STREAM_LIMIT,
@@ -49,13 +50,8 @@ _DACL_SECURITY_INFORMATION: Final[int] = 0x00000004
 _WINDOWS_ACL_TIMEOUT_SECONDS: Final[float] = 10.0
 
 
-class IsolationError(ValueError):
+class IsolationError(FieldError):
     """Unsafe replica launch boundary with a stable field path."""
-
-    def __init__(self, path: str, message: str) -> None:
-        self.path = path
-        self.message = message
-        super().__init__(f"{path}: {message}")
 
 
 @dataclass(frozen=True)
@@ -66,7 +62,6 @@ class ReplicaLaunch:
     replicas_root: Path
     replica_id: str
     workspace: Path
-    credential_store: Path | None
     environment_items: tuple[tuple[str, str], ...]
     read_only_paths: tuple[Path, ...]
     writable_paths: tuple[Path, ...]
@@ -87,7 +82,6 @@ def prepare_replica_launch(
     season_root: Path | str,
     replica_id: str,
     *,
-    credential_store: Path | str | None = None,
     host_environment: Mapping[str, str] | None = None,
 ) -> ReplicaLaunch:
     """Validate and freeze one direct replica launch boundary."""
@@ -107,20 +101,6 @@ def prepare_replica_launch(
     _reject_links(workspace)
     _require_workspace_layout(workspace)
 
-    resolved_credential_store: Path | None = None
-    if credential_store is not None:
-        resolved_credential_store = _require_resolved_directory(
-            credential_store,
-            path="credential_store",
-        )
-        if resolved_credential_store == season or resolved_credential_store.is_relative_to(
-            season
-        ):
-            raise IsolationError(
-                "credential_store",
-                "must be outside the season and replica workspaces",
-            )
-
     environment = _minimal_environment(
         host_environment or {},
         replica_id=replica,
@@ -131,7 +111,6 @@ def prepare_replica_launch(
         replicas_root=replicas_root,
         replica_id=replica,
         workspace=workspace,
-        credential_store=resolved_credential_store,
         environment_items=tuple(sorted(environment.items())),
         read_only_paths=tuple(workspace / name for name in READ_ONLY_AREAS),
         writable_paths=tuple(workspace / name for name in WRITABLE_AREAS),
@@ -288,13 +267,13 @@ def _require_resolved_directory(value: Path | str, *, path: str) -> Path:
         raise IsolationError(path, "must be resolved")
     if not resolved.is_dir():
         raise IsolationError(path, "must be an existing directory")
-    if _is_link_or_junction(candidate):
+    if is_link_or_junction(candidate):
         raise IsolationError(path, "symlink or junction is prohibited")
     return resolved
 
 
 def _require_child_directory(value: Path, *, parent: Path, path: str) -> Path:
-    if _is_link_or_junction(value):
+    if is_link_or_junction(value):
         raise IsolationError(path, "symlink or junction is prohibited")
     resolved = value.resolve(strict=False)
     if resolved.parent != parent or not resolved.is_dir():
@@ -303,10 +282,10 @@ def _require_child_directory(value: Path, *, parent: Path, path: str) -> Path:
 
 
 def _reject_links(root: Path) -> None:
-    if _is_link_or_junction(root):
+    if is_link_or_junction(root):
         raise IsolationError("workspace", "symlink or junction is prohibited")
     for path in root.rglob("*"):
-        if _is_link_or_junction(path):
+        if is_link_or_junction(path):
             relative = path.relative_to(root).as_posix()
             raise IsolationError(
                 f"workspace.{relative}",
@@ -322,11 +301,11 @@ def _reject_link_chain(workspace: Path, candidate: Path) -> None:
         return
     for part in relative.parts:
         current = current / part
-        if current.exists() and _is_link_or_junction(current):
+        if current.exists() and is_link_or_junction(current):
             raise IsolationError("path", "symlink or junction is prohibited")
 
 
-def _is_link_or_junction(path: Path) -> bool:
+def is_link_or_junction(path: Path) -> bool:
     if path.is_symlink():
         return True
     is_junction = getattr(path, "is_junction", None)

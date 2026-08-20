@@ -97,7 +97,6 @@ def test_reject_requires_reason() -> None:
 
 def test_event_types_match_the_plan() -> None:
     assert EVENT_TYPES == (
-        "round_opened",
         "decision_accepted",
         "decision_missing",
         "order_rejected",

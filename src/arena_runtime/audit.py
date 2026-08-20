@@ -14,7 +14,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Final, Mapping
+from typing import Any, Final, Mapping, Sequence
 
 from arena_kernel.schema._dump import dump_json
 from arena_kernel.schema._parse import (
@@ -27,10 +27,10 @@ from arena_kernel.schema._parse import (
     require_str,
     require_timestamp,
 )
-from arena_kernel.schema.errors import SchemaError
+from arena_kernel.schema.errors import FieldError, SchemaError
 from arena_kernel.schema.round_id import parse_round_id
 from arena_kernel.types import format_et_timestamp
-from arena_runtime.runner import RUNNER_OUTCOMES
+from arena_runtime.runner import RUNNER_OUTCOMES, is_sha256_hex
 
 AUDIT_SCHEMA_VERSION: Final[str] = SCHEMA_VERSION
 NORMALIZED_EVENTS_PATH: Final[str] = "normalized/events.jsonl"
@@ -44,11 +44,9 @@ AUDIT_EVENT_TYPES: Final[tuple[str, ...]] = (
     "replica_completed",
     "replica_terminated",
     "decision_collected",
-    "round_disposition_selected",
     "commit_started",
     "commit_completed",
     "pause",
-    "operator_intervention",
 )
 
 _EVENT_FIELDS: Final[tuple[str, ...]] = (
@@ -77,7 +75,6 @@ _ROUND_EVENT_TYPES: Final[frozenset[str]] = frozenset(AUDIT_EVENT_TYPES) - (
     _REPLICA_EVENT_TYPES
 )
 
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SECRET_FIELD_NAMES: Final[frozenset[str]] = frozenset(
     {
         "access_token",
@@ -206,12 +203,6 @@ class DecisionCollectedPayload:
 
 
 @dataclass(frozen=True)
-class RoundDispositionSelectedPayload:
-    disposition: str
-    reason_codes: tuple[str, ...]
-
-
-@dataclass(frozen=True)
 class CommitStartedPayload:
     pass
 
@@ -226,12 +217,6 @@ class PausePayload:
     reason: str
 
 
-@dataclass(frozen=True)
-class OperatorInterventionPayload:
-    action: str
-    reason: str
-
-
 AuditPayload = (
     PreflightStartedPayload
     | PreflightCompletedPayload
@@ -239,11 +224,9 @@ AuditPayload = (
     | ReplicaCompletedPayload
     | ReplicaTerminatedPayload
     | DecisionCollectedPayload
-    | RoundDispositionSelectedPayload
     | CommitStartedPayload
     | CommitCompletedPayload
     | PausePayload
-    | OperatorInterventionPayload
 )
 
 
@@ -261,13 +244,8 @@ class AuditEvent:
     provider_artifacts: tuple[ProviderArtifactReference, ...]
 
 
-class AuditArchiveError(ValueError):
+class AuditArchiveError(FieldError):
     """Unsafe or inconsistent archive operation with a stable field path."""
-
-    def __init__(self, path: str, message: str) -> None:
-        self.path = path
-        self.message = message
-        super().__init__(f"{path}: {message}")
 
 
 class AuditArchive:
@@ -522,6 +500,36 @@ def dump_audit_event(event: AuditEvent) -> str:
     return dump_json(audit_event_to_dict(canonical))
 
 
+def append_runner_event(
+    archive: AuditArchive,
+    *,
+    event_type: str,
+    product_id: str | None,
+    replica_id: str | None,
+    round_id: str,
+    timestamp: datetime,
+    payload: Mapping[str, Any],
+    artifacts: Sequence[ProviderArtifactReference] = (),
+) -> None:
+    """Append one normalized runner lifecycle event."""
+
+    event = parse_audit_event(
+        {
+            "schema_version": AUDIT_SCHEMA_VERSION,
+            "type": event_type,
+            "product_id": product_id,
+            "replica_id": replica_id,
+            "round_id": round_id,
+            "timestamp": format_et_timestamp(timestamp),
+            "payload": dict(payload),
+            "provider_artifacts": [
+                {"path": item.path, "checksum": item.checksum} for item in artifacts
+            ],
+        }
+    )
+    archive.append_event(event)
+
+
 def _parse_payload(event_type: str, data: Mapping[str, Any]) -> AuditPayload:
     path = "payload"
     if event_type == "preflight_started":
@@ -593,34 +601,14 @@ def _parse_payload(event_type: str, data: Mapping[str, Any]) -> AuditPayload:
         checksum = _optional_string(data, "decision_checksum", path=path)
         _validate_checksum_presence(present, checksum)
         return DecisionCollectedPayload(present, checksum)
-    if event_type == "round_disposition_selected":
-        require_object(
-            data,
-            required=("disposition", "reason_codes"),
-            path=path,
-        )
-        return RoundDispositionSelectedPayload(
-            disposition=require_str(data, "disposition", path=path),
-            reason_codes=_require_unique_strings(
-                data,
-                "reason_codes",
-                path=path,
-            ),
-        )
     if event_type == "commit_started":
         require_object(data, required=(), path=path)
         return CommitStartedPayload()
     if event_type == "commit_completed":
         require_object(data, required=(), path=path)
         return CommitCompletedPayload()
-    if event_type == "pause":
-        require_object(data, required=("reason",), path=path)
-        return PausePayload(reason=require_str(data, "reason", path=path))
-    require_object(data, required=("action", "reason"), path=path)
-    return OperatorInterventionPayload(
-        action=require_str(data, "action", path=path),
-        reason=require_str(data, "reason", path=path),
-    )
+    require_object(data, required=("reason",), path=path)
+    return PausePayload(reason=require_str(data, "reason", path=path))
 
 
 def _payload_to_dict(payload: AuditPayload) -> dict[str, Any]:
@@ -655,17 +643,10 @@ def _payload_to_dict(payload: AuditPayload) -> dict[str, Any]:
             "decision_present": payload.decision_present,
             "decision_checksum": payload.decision_checksum,
         }
-    if isinstance(payload, RoundDispositionSelectedPayload):
-        return {
-            "disposition": payload.disposition,
-            "reason_codes": list(payload.reason_codes),
-        }
     if isinstance(payload, (CommitStartedPayload, CommitCompletedPayload)):
         return {}
     if isinstance(payload, PausePayload):
         return {"reason": payload.reason}
-    if isinstance(payload, OperatorInterventionPayload):
-        return {"action": payload.action, "reason": payload.reason}
     raise SchemaError("payload", "unknown audit payload type")
 
 
@@ -690,7 +671,7 @@ def _parse_provider_artifacts(
             path=join_path(item_path, "path"),
         )
         checksum = require_str(item, "checksum", path=item_path)
-        if _SHA256.fullmatch(checksum) is None:
+        if not is_sha256_hex(checksum):
             raise SchemaError(
                 join_path(item_path, "checksum"),
                 "must be a lowercase SHA-256 hex digest",
@@ -757,33 +738,9 @@ def _require_bool(
     return value
 
 
-def _require_unique_strings(
-    data: Mapping[str, Any],
-    key: str,
-    *,
-    path: str,
-) -> tuple[str, ...]:
-    raw_values = require_list(data, key, path=path)
-    values: list[str] = []
-    seen: set[str] = set()
-    parent = join_path(path, key)
-    for index, item in enumerate(raw_values):
-        item_path = join_path(parent, str(index))
-        if not isinstance(item, str) or not item or item.strip() != item:
-            raise SchemaError(
-                item_path,
-                "must be a non-empty string without padding",
-            )
-        if item in seen:
-            raise SchemaError(item_path, "duplicate reason code")
-        seen.add(item)
-        values.append(item)
-    return tuple(values)
-
-
 def _validate_checksum_presence(present: bool, checksum: str | None) -> None:
     if present:
-        if checksum is None or _SHA256.fullmatch(checksum) is None:
+        if checksum is None or not is_sha256_hex(checksum):
             raise SchemaError(
                 "payload.decision_checksum",
                 "must be a lowercase SHA-256 hex digest when decision is present",

@@ -41,17 +41,9 @@ PAYLOADS: dict[str, dict[str, Any]] = {
         "decision_present": True,
         "decision_checksum": DECISION_CHECKSUM,
     },
-    "round_disposition_selected": {
-        "disposition": "candidate_commit",
-        "reason_codes": [],
-    },
     "commit_started": {},
     "commit_completed": {},
     "pause": {"reason": "common_data_unavailable"},
-    "operator_intervention": {
-        "action": "pause",
-        "reason": "written protocol policy",
-    },
 }
 
 assert set(PAYLOADS) == set(AUDIT_EVENT_TYPES)

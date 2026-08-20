@@ -1,42 +1,74 @@
-"""Fake Grok Build executable for fresh-session capture and exact resume tests."""
+"""Fake Grok Build CLI for preflight, fresh-session, and resume tests."""
 
 from __future__ import annotations
 
 import base64
 import json
 import sys
+import time
 from pathlib import Path
 
 
 def main() -> int:
     scenario = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     arguments = sys.argv[2:]
-    command_log = Path(scenario["command_log_path"])
-    command_log.parent.mkdir(parents=True, exist_ok=True)
-    with command_log.open("a", encoding="utf-8", newline="\n") as stream:
+    log_key = "command_log_path" if "command_log_path" in scenario else "log_path"
+    log_path = Path(scenario[log_key])
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8", newline="\n") as stream:
         stream.write(json.dumps(arguments) + "\n")
 
     if arguments == ["version", "--json"]:
         print(json.dumps(scenario["version"]))
-        return 0
+        return int(scenario.get("version_exit", 0))
     if arguments == ["models"]:
         print(scenario["models_output"], end="")
         if not str(scenario["models_output"]).endswith("\n"):
             print()
-        return 0
+        return int(scenario.get("models_exit", 0))
     if arguments == ["--help"]:
         print("\n".join(scenario["help_items"]))
-        return 0
+        return int(scenario.get("help_exit", 0))
     if arguments == ["agent", "--help"]:
         print("\n".join(scenario["agent_help_items"]))
-        return 0
+        return int(scenario.get("agent_help_exit", 0))
     if arguments == ["inspect", "--json"]:
-        print(json.dumps(scenario["inspect"]))
-        return 0
+        if scenario.get("inspect_invalid", False):
+            print("not json")
+        else:
+            print(json.dumps(scenario["inspect"]))
+        return int(scenario.get("inspect_exit", 0))
 
     if "--single" not in arguments:
         print(f"unexpected arguments: {arguments!r}", file=sys.stderr)
         return 99
+
+    sleep_seconds = float(scenario.get("run_sleep_seconds", 0))
+    if sleep_seconds:
+        time.sleep(sleep_seconds)
+
+    if "run_capture_path" in scenario:
+        prompt = arguments[arguments.index("--single") + 1]
+        capture = {
+            "argv": arguments,
+            "cwd": str(Path.cwd()),
+            "prompt_base64": base64.b64encode(prompt.encode("utf-8")).decode("ascii"),
+        }
+        Path(scenario["run_capture_path"]).write_text(
+            json.dumps(capture, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        encoded_decision = scenario.get("decision_base64")
+        if encoded_decision is not None:
+            (Path.cwd() / "outbox" / "decision.json").write_bytes(
+                base64.b64decode(encoded_decision)
+            )
+        for event in scenario.get("stdout_events", []):
+            print(json.dumps(event), flush=True)
+        stderr_text = scenario.get("stderr_text", "")
+        if stderr_text:
+            print(stderr_text, file=sys.stderr, flush=True)
+        return int(scenario.get("run_exit", 0))
 
     prompt = arguments[arguments.index("--single") + 1]
     is_resume = "--resume" in arguments
@@ -57,7 +89,7 @@ def main() -> int:
             )
             + "\n"
         )
-    decision = scenario["decisions"].get(prompt)
+    decision = scenario.get("decisions", {}).get(prompt)
     if decision is not None:
         (Path.cwd() / "outbox" / "decision.json").write_bytes(
             base64.b64decode(decision)

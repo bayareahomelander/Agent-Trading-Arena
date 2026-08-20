@@ -1,4 +1,4 @@
-"""R1: the kernel stays offline and the vocabulary slice has no live edges."""
+"""R1: the kernel stays offline and has no live edges."""
 
 import ast
 from pathlib import Path
@@ -21,14 +21,6 @@ def _import_roots(path: Path) -> set[str]:
 def test_arena_kernel_does_not_import_arena_runtime() -> None:
     for path in (PROJECT_ROOT / "src" / "arena_kernel").rglob("*.py"):
         assert "arena_runtime" not in _import_roots(path), path
-
-
-def test_r1_vocabulary_modules_import_only_typing_and_their_own_package() -> None:
-    allowed = {"__future__", "typing", "arena_runtime"}
-    runtime_root = PROJECT_ROOT / "src" / "arena_runtime"
-    for name in ("__init__.py", "module_map.py", "vocabulary.py"):
-        path = runtime_root / name
-        assert _import_roots(path) <= allowed, path
 
 
 def test_arena_kernel_does_not_import_process_or_network_libraries() -> None:

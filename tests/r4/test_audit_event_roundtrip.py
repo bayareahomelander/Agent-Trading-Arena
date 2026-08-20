@@ -20,11 +20,9 @@ def test_audit_event_types_are_complete_and_exact() -> None:
         "replica_completed",
         "replica_terminated",
         "decision_collected",
-        "round_disposition_selected",
         "commit_started",
         "commit_completed",
         "pause",
-        "operator_intervention",
     )
 
 

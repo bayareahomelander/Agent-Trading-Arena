@@ -16,11 +16,10 @@ from .conftest import argv, deadline, make_season, sanitized_host_environment
 def test_permission_guard_marks_only_agent_and_outbox_writable(
     tmp_path: Path,
 ) -> None:
-    season, credentials = make_season(tmp_path)
+    season = make_season(tmp_path)
     launch = prepare_replica_launch(
         season,
         "product-a-1",
-        credential_store=credentials,
         host_environment=sanitized_host_environment(),
     )
 
@@ -38,11 +37,10 @@ def test_permission_guard_marks_only_agent_and_outbox_writable(
 def test_child_can_write_agent_and_outbox_but_not_frozen_state(
     tmp_path: Path,
 ) -> None:
-    season, credentials = make_season(tmp_path)
+    season = make_season(tmp_path)
     launch = prepare_replica_launch(
         season,
         "product-a-1",
-        credential_store=credentials,
         host_environment=sanitized_host_environment(),
     )
 
@@ -76,11 +74,10 @@ def test_child_can_write_agent_and_outbox_but_not_frozen_state(
 
 
 def test_original_modes_are_restored_after_launch(tmp_path: Path) -> None:
-    season, credentials = make_season(tmp_path)
+    season = make_season(tmp_path)
     launch = prepare_replica_launch(
         season,
         "product-a-1",
-        credential_store=credentials,
         host_environment=sanitized_host_environment(),
     )
     rules = launch.workspace / "RULES.md"

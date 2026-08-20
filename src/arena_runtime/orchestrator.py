@@ -14,7 +14,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -24,19 +23,18 @@ from typing import Final, Mapping, Sequence
 
 from arena_kernel.baselines import dump_baselines_result, run_baselines
 from arena_kernel.ledger import MissingCloseError, final_nlv, mark_to_close
-from arena_kernel.matching import apply_decision
+from arena_kernel.matching import apply_decision, extend_fills
 from arena_kernel.schema._dump import dump_json
 from arena_kernel.schema._parse import SCHEMA_VERSION
 from arena_kernel.schema.clock import clock_to_dict
 from arena_kernel.schema.decision import parse_decision
-from arena_kernel.schema.errors import SchemaError
+from arena_kernel.schema.errors import FieldError, SchemaError
 from arena_kernel.schema.events import (
     LedgerEvent,
-    OrderFilledPayload,
     dump_ledger_event,
     make_decision_missing,
 )
-from arena_kernel.schema.fills import FillsFile, PriorFill, dump_fills
+from arena_kernel.schema.fills import FillsFile, dump_fills
 from arena_kernel.schema.market import Snapshot, bar_to_dict, parse_snapshot
 from arena_kernel.schema.portfolio import Portfolio, dump_portfolio, parse_portfolio
 from arena_kernel.types import format_et_timestamp
@@ -52,16 +50,16 @@ from arena_runtime.disposition import (
     RoundDisposition,
 )
 from arena_runtime.registration import RuntimeRegistration
+from arena_runtime.isolation import is_link_or_junction
 from arena_runtime.runner import (
     RUNNER_CONTRACT_VERSION,
     PreflightResult,
     Runner,
     RunnerRequest,
     RunnerResult,
+    is_sha256_hex,
     require_matching_identity,
 )
-
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 REPLICA_STATUS_ACTIVE: Final[str] = "active"
 REPLICA_STATUS_INACTIVE: Final[str] = "inactive"
@@ -80,13 +78,6 @@ COMMON_DATA_STATUSES: Final[tuple[str, ...]] = (
 )
 
 COMMON_DATA_UNAVAILABLE_REASON: Final[str] = "common_data_unavailable"
-SHARED_PREFLIGHT_FAILURES: Final[frozenset[str]] = frozenset(
-    {
-        "quota_exhausted",
-        "provider_unavailable",
-        COMMON_DATA_UNAVAILABLE_REASON,
-    }
-)
 _PAUSE_REASON_PRIORITY: Final[tuple[str, ...]] = (
     COMMON_DATA_UNAVAILABLE_REASON,
     "quota_exhausted",
@@ -94,13 +85,8 @@ _PAUSE_REASON_PRIORITY: Final[tuple[str, ...]] = (
 )
 
 
-class OrchestratorError(ValueError):
+class OrchestratorError(FieldError):
     """Invalid orchestrator input with a stable field path."""
-
-    def __init__(self, path: str, message: str) -> None:
-        self.path = path
-        self.message = message
-        super().__init__(f"{path}: {message}")
 
 
 @dataclass(frozen=True)
@@ -198,7 +184,7 @@ class SealedDecisionRecord:
                     "byte_length",
                     "required when a decision file is present",
                 )
-            if self.checksum is None or _SHA256.fullmatch(self.checksum) is None:
+            if self.checksum is None or not is_sha256_hex(self.checksum):
                 raise OrchestratorError(
                     "checksum",
                     "must be a lowercase SHA-256 hex digest when present",
@@ -498,7 +484,7 @@ def mark_official_close(
     if not replica_ids:
         raise OrchestratorError("replica_ids", "must contain at least one replica")
     if not callable(getattr(vendor, "official_closes", None)):
-        raise OrchestratorError("vendor", "expected a Vendor with official_closes")
+        raise OrchestratorError("vendor", "expected official_closes")
     root = _require_books_root(books_root, create=False)
     books = tuple(
         _load_published_portfolio(root, replica_id) for replica_id in replica_ids
@@ -890,7 +876,7 @@ def _require_text(value: object, *, path: str) -> None:
 
 
 def _require_checksum(value: object) -> None:
-    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+    if not is_sha256_hex(value):
         raise OrchestratorError(
             "snapshot_checksum",
             "must be a lowercase SHA-256 hex digest",
@@ -998,7 +984,7 @@ def _require_collection_workspace(value: object, replica_id: str) -> Path:
     resolved = candidate.resolve(strict=False)
     if resolved != candidate or ".." in candidate.parts:
         raise OrchestratorError(path_name, "must be resolved")
-    if _is_link_or_junction(candidate):
+    if is_link_or_junction(candidate):
         raise OrchestratorError(path_name, "symlink or junction is prohibited")
     if not resolved.is_dir():
         raise OrchestratorError(path_name, "must be an existing directory")
@@ -1018,7 +1004,7 @@ def _require_staging_root(
     resolved = candidate.resolve(strict=False)
     if resolved != candidate or ".." in candidate.parts:
         raise OrchestratorError("staging_root", "must be resolved")
-    if _is_link_or_junction(candidate):
+    if is_link_or_junction(candidate):
         raise OrchestratorError("staging_root", "symlink or junction is prohibited")
     for workspace in workspaces:
         if resolved == workspace or resolved.is_relative_to(workspace):
@@ -1033,7 +1019,7 @@ def _require_staging_root(
             "staging_root",
             f"cannot create staging directory: {exc}",
         ) from exc
-    if not resolved.is_dir() or _is_link_or_junction(resolved):
+    if not resolved.is_dir() or is_link_or_junction(resolved):
         raise OrchestratorError("staging_root", "must be an existing directory")
     return resolved
 
@@ -1094,7 +1080,7 @@ def _read_sealed_decision(
     _reject_link_chain(workspace, source, path=field)
     if not source.is_file():
         raise OrchestratorError(field, "sealed decision file is missing")
-    if _is_link_or_junction(source):
+    if is_link_or_junction(source):
         raise OrchestratorError(field, "symlink or junction is prohibited")
     try:
         payload = source.read_bytes()
@@ -1130,7 +1116,7 @@ def _write_staged_decision(
         )
     try:
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        if _is_link_or_junction(resolved.parent) or _is_link_or_junction(
+        if is_link_or_junction(resolved.parent) or is_link_or_junction(
             resolved.parent.parent
         ):
             raise OrchestratorError(
@@ -1157,15 +1143,8 @@ def _reject_link_chain(root: Path, candidate: Path, *, path: str) -> None:
         raise OrchestratorError(path, "must stay within the replica workspace") from exc
     for part in relative.parts:
         current = current / part
-        if current.exists() and _is_link_or_junction(current):
+        if current.exists() and is_link_or_junction(current):
             raise OrchestratorError(path, "symlink or junction is prohibited")
-
-
-def _is_link_or_junction(path: Path) -> bool:
-    if path.is_symlink():
-        return True
-    is_junction = getattr(path, "is_junction", None)
-    return bool(is_junction()) if callable(is_junction) else False
 
 
 def _require_evaluation_books(
@@ -1256,7 +1235,7 @@ def _evaluate_one_record(
         treatment=record.treatment,
         events=events,
         portfolio=portfolio,
-        fills=_extend_candidate_fills(fills, events),
+        fills=extend_fills(fills, events),
     )
 
 
@@ -1293,30 +1272,6 @@ def _apply_staged_decision(
             book,
         )
     return apply_decision(book, decision, snapshot)
-
-
-def _extend_candidate_fills(
-    book: FillsFile,
-    events: tuple[LedgerEvent, ...],
-) -> FillsFile:
-    extra: list[PriorFill] = []
-    for event in events:
-        payload = event.payload
-        if not isinstance(payload, OrderFilledPayload) or event.round_id is None:
-            continue
-        extra.append(
-            PriorFill(
-                fill_id=payload.fill_id,
-                round_id=event.round_id,
-                symbol=payload.symbol,
-                side=payload.side,
-                quantity=payload.quantity,
-                fill_price=payload.fill_price,
-                notional_usd=payload.notional_usd,
-                filled_at=event.timestamp,
-            )
-        )
-    return FillsFile(schema_version=book.schema_version, fills=book.fills + tuple(extra))
 
 
 def _require_books_root(value: object, *, create: bool = True) -> Path:

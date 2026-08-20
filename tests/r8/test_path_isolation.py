@@ -14,11 +14,10 @@ from .conftest import make_season, sanitized_host_environment
 
 
 def _launch(tmp_path: Path):
-    season, credentials = make_season(tmp_path)
+    season = make_season(tmp_path)
     return prepare_replica_launch(
         season,
         "product-a-1",
-        credential_store=credentials,
         host_environment=sanitized_host_environment(),
     )
 

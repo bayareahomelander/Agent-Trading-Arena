@@ -16,7 +16,6 @@ from arena_kernel.schema.events import (
     MarkedToClosePayload,
     OrderFilledPayload,
     OrderRejectedPayload,
-    RoundOpenedPayload,
     dump_ledger_event,
     ledger_event_to_dict,
     make_decision_accepted,
@@ -25,7 +24,6 @@ from arena_kernel.schema.events import (
     make_marked_to_close,
     make_order_filled,
     make_order_rejected,
-    make_round_opened,
     parse_ledger_event,
 )
 from arena_kernel.schema.fills import FillsFile, PriorFill, dump_fills, parse_fills
@@ -55,7 +53,6 @@ __all__ = [
     "Portfolio",
     "Position",
     "PriorFill",
-    "RoundOpenedPayload",
     "SchemaError",
     "Snapshot",
     "dump_clock",
@@ -70,7 +67,6 @@ __all__ = [
     "make_marked_to_close",
     "make_order_filled",
     "make_order_rejected",
-    "make_round_opened",
     "parse_bar",
     "parse_clock",
     "parse_decision",

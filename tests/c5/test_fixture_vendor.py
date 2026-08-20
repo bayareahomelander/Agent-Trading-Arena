@@ -11,7 +11,6 @@ from arena_kernel import marketdata
 from arena_kernel.marketdata import (
     CommonDataUnavailable,
     FixtureVendor,
-    Vendor,
 )
 from arena_kernel.types import parse_et_timestamp
 
@@ -25,10 +24,6 @@ SESSION = date(2026, 11, 2)
 
 def _vendor() -> FixtureVendor:
     return FixtureVendor(VENDOR_DIR)
-
-
-def test_fixture_vendor_is_a_vendor() -> None:
-    assert isinstance(_vendor(), Vendor)
 
 
 def test_minute_bars_returns_requested_symbols_in_the_window() -> None:

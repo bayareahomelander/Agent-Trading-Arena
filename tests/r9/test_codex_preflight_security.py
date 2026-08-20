@@ -11,6 +11,7 @@ def test_synthetic_auth_cache_secret_never_reaches_archive(tmp_path: Path) -> No
     adapter, request, archive, _, _ = make_case(tmp_path)
     assert isinstance(adapter, CodexAdapter)
     credential_store = tmp_path / "codex-credentials"
+    credential_store.mkdir()
     synthetic_secret = b"oauth-secret-never-read-123456789"
     (credential_store / "auth.json").write_bytes(synthetic_secret)
 

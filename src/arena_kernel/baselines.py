@@ -28,6 +28,7 @@ from arena_kernel.schema.events import LedgerEvent, ledger_event_to_dict
 from arena_kernel.schema.market import Bar, Snapshot, parse_bar
 from arena_kernel.schema.portfolio import Portfolio, parse_portfolio
 from arena_kernel.schema.round_id import parse_round_id
+from arena_kernel.schema.errors import FieldError
 from arena_kernel.types import CASH_QUANTUM, as_decimal, format_cash, parse_et_timestamp, round_cash
 
 BASELINE_PRODUCT_ID: Final[str] = "baseline"
@@ -39,13 +40,6 @@ BASELINE_REPLICA_IDS: Final[tuple[str, ...]] = (
     "baseline:equal_weight",
     "baseline:seeded_random",
 )
-
-BASELINE_MEANINGS: Final[Mapping[str, str]] = {
-    "baseline:cash": "Holds starting cash",
-    "baseline:spy_buy_and_hold": "SPY at first window only",
-    "baseline:equal_weight": "Equal notionals at first window, no rebalance",
-    "baseline:seeded_random": "Seeded allocations at each window",
-}
 
 _ROUNDS_PATH: Final[str] = "rounds.json"
 _SPY: Final[str] = "SPY"
@@ -65,7 +59,7 @@ class BaselineResult:
     nlv: Decimal
 
 
-class FirstWindowError(ValueError):
+class FirstWindowError(FieldError):
     """No first scored fill window. ``path`` names the tape field."""
 
     def __init__(
@@ -75,10 +69,8 @@ class FirstWindowError(ValueError):
         *,
         required_symbols: tuple[str, ...] = (),
     ) -> None:
-        self.path = path
-        self.message = message
+        super().__init__(path, message)
         self.required_symbols = required_symbols
-        super().__init__(f"{path}: {message}")
 
 
 def first_scored_round_id(
@@ -165,13 +157,8 @@ def run_cash_baseline(
     return _close_baseline(book, (), official_closes, close_timestamp)
 
 
-class SpyBaselineError(ValueError):
+class SpyBaselineError(FieldError):
     """SPY buy-and-hold cannot run. Do not guess another ticker."""
-
-    def __init__(self, path: str, message: str) -> None:
-        self.path = path
-        self.message = message
-        super().__init__(f"{path}: {message}")
 
 
 def run_spy_buy_and_hold(
@@ -278,13 +265,8 @@ def _spy_all_in_decision(round_id: str, cash: Decimal) -> Decision:
     )
 
 
-class EqualWeightError(ValueError):
+class EqualWeightError(FieldError):
     """Equal-weight baseline cannot run on this universe or book."""
-
-    def __init__(self, path: str, message: str) -> None:
-        self.path = path
-        self.message = message
-        super().__init__(f"{path}: {message}")
 
 
 def equal_weight_notionals(
@@ -378,13 +360,8 @@ def _equal_weight_decision(
     )
 
 
-class SeededRandomError(ValueError):
+class SeededRandomError(FieldError):
     """Seeded random cannot run. Do not fall back to the clock."""
-
-    def __init__(self, path: str, message: str) -> None:
-        self.path = path
-        self.message = message
-        super().__init__(f"{path}: {message}")
 
 
 def load_random_seed(path: Path | str) -> int:
@@ -546,13 +523,8 @@ def dump_baselines_result(results: Mapping[str, BaselineResult]) -> str:
     return dump_json({"replicas": replicas})
 
 
-class BaselineTapeError(ValueError):
+class BaselineTapeError(FieldError):
     """Tape pieces needed to run all four baselines are missing or malformed."""
-
-    def __init__(self, path: str, message: str) -> None:
-        self.path = path
-        self.message = message
-        super().__init__(f"{path}: {message}")
 
 
 def _load_baseline_tape(

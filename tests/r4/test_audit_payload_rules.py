@@ -40,14 +40,6 @@ from .conftest import DECISION_CHECKSUM, audit_record
             },
             "payload.decision_checksum",
         ),
-        (
-            "round_disposition_selected",
-            {
-                "disposition": "candidate_commit",
-                "reason_codes": ["ready", "ready"],
-            },
-            "payload.reason_codes.1",
-        ),
     ],
 )
 def test_inconsistent_payload_fails_at_named_path(
@@ -75,16 +67,3 @@ def test_missing_decision_is_explicit_without_inventing_a_checksum() -> None:
 
     assert payload.decision_present is False
     assert payload.decision_checksum is None
-
-
-def test_round_disposition_value_is_not_decided_before_r19() -> None:
-    record = audit_record("round_disposition_selected")
-    record["payload"] = {
-        "disposition": "future-provider-neutral-treatment",
-        "reason_codes": ["recorded-reason"],
-    }
-
-    payload = parse_audit_event(record).payload
-
-    assert payload.disposition == "future-provider-neutral-treatment"
-    assert payload.reason_codes == ("recorded-reason",)

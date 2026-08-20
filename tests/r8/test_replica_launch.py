@@ -8,21 +8,19 @@ from arena_runtime.isolation import prepare_replica_launch, run_isolated_process
 from .conftest import argv, deadline, make_season, sanitized_host_environment
 
 
-def test_valid_replica_launch_freezes_direct_workspace_and_credential_store(
+def test_valid_replica_launch_freezes_direct_workspace(
     tmp_path: Path,
 ) -> None:
-    season, credentials = make_season(tmp_path)
+    season = make_season(tmp_path)
 
     launch = prepare_replica_launch(
         season,
         "product-a-1",
-        credential_store=credentials,
         host_environment=sanitized_host_environment(),
     )
 
     assert launch.workspace == season / "replicas" / "product-a-1"
     assert launch.workspace.parent == launch.replicas_root
-    assert launch.credential_store == credentials
     assert launch.read_only_paths == (
         launch.workspace / "RULES.md",
         launch.workspace / "PROMPT.md",
@@ -35,11 +33,10 @@ def test_valid_replica_launch_freezes_direct_workspace_and_credential_store(
 
 
 def test_isolated_process_uses_replica_root_as_cwd(tmp_path: Path) -> None:
-    season, credentials = make_season(tmp_path)
+    season = make_season(tmp_path)
     launch = prepare_replica_launch(
         season,
         "product-a-1",
-        credential_store=credentials,
         host_environment=sanitized_host_environment(),
     )
 
@@ -59,11 +56,10 @@ def test_isolated_process_uses_replica_root_as_cwd(tmp_path: Path) -> None:
 def test_launch_environment_is_minimal_and_drops_secret_or_unrelated_values(
     tmp_path: Path,
 ) -> None:
-    season, credentials = make_season(tmp_path)
+    season = make_season(tmp_path)
     launch = prepare_replica_launch(
         season,
         "product-a-1",
-        credential_store=credentials,
         host_environment=sanitized_host_environment(),
     )
     environment = launch.environment()
@@ -73,7 +69,6 @@ def test_launch_environment_is_minimal_and_drops_secret_or_unrelated_values(
     assert "HOME" not in environment
     assert "UNRELATED_SETTING" not in environment
     assert "PROVIDER_API_KEY" not in environment
-    assert str(credentials) not in environment.values()
 
     facts = run_isolated_process(launch, argv("report"), deadline=deadline())
     report = json.loads(facts.stdout)

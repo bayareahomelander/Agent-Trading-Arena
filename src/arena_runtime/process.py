@@ -16,19 +16,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO, Final, Mapping, Sequence
 
+from arena_kernel.schema.errors import FieldError
 from arena_runtime.audit import validate_audit_environment
 
 DEFAULT_STREAM_LIMIT: Final[int] = 1024 * 1024
 _TERMINATION_WAIT_SECONDS: Final[float] = 10.0
 
 
-class ProcessSupervisorError(ValueError):
+class ProcessSupervisorError(FieldError):
     """Invalid launch input or failed supervision with a stable field path."""
-
-    def __init__(self, path: str, message: str) -> None:
-        self.path = path
-        self.message = message
-        super().__init__(f"{path}: {message}")
 
 
 @dataclass(frozen=True)

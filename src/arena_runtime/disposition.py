@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final, Sequence
 
-from arena_runtime.runner import RUNNER_OUTCOMES, RunnerResult
+from arena_runtime.runner import FieldError, RUNNER_OUTCOMES, RunnerResult
 
 COMMON_DATA_AVAILABLE: Final[str] = "available"
 COMMON_DATA_UNAVAILABLE: Final[str] = "unavailable"
@@ -57,13 +57,8 @@ _SHARED_VOID_ORDER: Final[tuple[str, ...]] = (
 )
 
 
-class DispositionError(ValueError):
+class DispositionError(FieldError):
     """Invalid disposition input with a stable field path."""
-
-    def __init__(self, path: str, message: str) -> None:
-        self.path = path
-        self.message = message
-        super().__init__(f"{path}: {message}")
 
 
 @dataclass(frozen=True)

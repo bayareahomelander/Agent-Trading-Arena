@@ -38,7 +38,6 @@ from arena_kernel.types import (
 )
 
 EVENT_TYPES = (
-    "round_opened",
     "decision_accepted",
     "decision_missing",
     "order_rejected",
@@ -51,7 +50,6 @@ REFERENCE_SOURCES = ("vwap", "midpoint_fallback")
 
 _ROUND_REQUIRED = frozenset(
     {
-        "round_opened",
         "decision_accepted",
         "decision_missing",
         "order_rejected",
@@ -84,11 +82,6 @@ FILL_PAYLOAD_KEYS = (
 )
 
 REJECT_PAYLOAD_KEYS = ("reason", "symbol", "side", "priority")
-
-
-@dataclass(frozen=True)
-class RoundOpenedPayload:
-    pass
 
 
 @dataclass(frozen=True)
@@ -138,8 +131,7 @@ class FinalNlvPayload:
 
 
 Payload = (
-    RoundOpenedPayload
-    | DecisionAcceptedPayload
+    DecisionAcceptedPayload
     | DecisionMissingPayload
     | OrderRejectedPayload
     | OrderFilledPayload
@@ -224,18 +216,6 @@ def make_order_rejected(
             side=_side(side) if side is not None else None,
             priority=_optional_priority(priority),
         ),
-    )
-
-
-def make_round_opened(
-    *, replica_id: str, round_id: str, timestamp: datetime
-) -> LedgerEvent:
-    return _simple_event(
-        "round_opened",
-        replica_id=replica_id,
-        round_id=round_id,
-        timestamp=timestamp,
-        payload=RoundOpenedPayload(),
     )
 
 
@@ -373,8 +353,6 @@ def _simple_event(
 
 
 def _payload_to_dict(payload: Payload) -> dict[str, Any]:
-    if isinstance(payload, RoundOpenedPayload):
-        return {}
     if isinstance(payload, DecisionAcceptedPayload):
         return {"action": payload.action, "order_count": payload.order_count}
     if isinstance(payload, DecisionMissingPayload):
@@ -411,9 +389,6 @@ def _payload_to_dict(payload: Payload) -> dict[str, Any]:
 
 def _parse_payload(event_type: str, data: Mapping[str, Any]) -> Payload:
     path = "payload"
-    if event_type == "round_opened":
-        require_object(data, required=(), path=path)
-        return RoundOpenedPayload()
     if event_type == "decision_accepted":
         require_object(data, required=("action", "order_count"), path=path)
         action = require_str(data, "action", path=path)

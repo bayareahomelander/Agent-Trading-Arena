@@ -9,13 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from arena_kernel.ledger import final_nlv, mark_to_close, median_nlv
-from arena_kernel.matching import apply_decision
+from arena_kernel.matching import apply_decision, extend_fills
 from arena_kernel.schema._dump import dump_json
 from arena_kernel.schema._parse import SCHEMA_VERSION, load_json_object
 from arena_kernel.schema.clock import parse_clock
 from arena_kernel.schema.decision import parse_decision
-from arena_kernel.schema.events import LedgerEvent, OrderFilledPayload, ledger_event_to_dict
-from arena_kernel.schema.fills import FillsFile, PriorFill
+from arena_kernel.schema.events import LedgerEvent, ledger_event_to_dict
+from arena_kernel.schema.fills import FillsFile
 from arena_kernel.schema.market import Bar, Snapshot, parse_bar
 from arena_kernel.schema.portfolio import Portfolio, parse_portfolio
 from arena_kernel.types import as_decimal, format_cash, parse_et_timestamp
@@ -81,7 +81,7 @@ def replay_tape(tape_dir: Path | str, work_root: Path | str) -> ReplayResult:
             round_events, portfolio = apply_decision(portfolio, decision, snapshot)
             events[replica_id].extend(round_events)
             books[replica_id] = portfolio
-            fills[replica_id] = _extend_fills(fills[replica_id], round_events)
+            fills[replica_id] = extend_fills(fills[replica_id], round_events)
 
     equities: dict[str, Decimal] = {}
     nlvs: dict[str, Decimal] = {}
@@ -142,27 +142,6 @@ def _load_bars(path: Path) -> tuple[Bar, ...]:
 
 def _load_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _extend_fills(book: FillsFile, events: tuple[LedgerEvent, ...]) -> FillsFile:
-    extra: list[PriorFill] = []
-    for event in events:
-        payload = event.payload
-        if not isinstance(payload, OrderFilledPayload) or event.round_id is None:
-            continue
-        extra.append(
-            PriorFill(
-                fill_id=payload.fill_id,
-                round_id=event.round_id,
-                symbol=payload.symbol,
-                side=payload.side,
-                quantity=payload.quantity,
-                fill_price=payload.fill_price,
-                notional_usd=payload.notional_usd,
-                filled_at=event.timestamp,
-            )
-        )
-    return FillsFile(schema_version=book.schema_version, fills=book.fills + tuple(extra))
 
 
 def _money(value: Decimal) -> str:
