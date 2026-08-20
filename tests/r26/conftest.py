@@ -13,10 +13,11 @@ from arena_kernel.marketdata import (
     FixtureVendor,
     bars_at_reference,
     build_tape,
+    last_complete_minute,
     publish_round,
 )
 from arena_kernel.schema.fills import FillsFile
-from arena_kernel.schema.market import parse_snapshot
+from arena_kernel.schema.market import Snapshot, parse_snapshot
 from arena_kernel.schema.portfolio import Portfolio, parse_portfolio
 from arena_runtime.adapters.fake import FakeRunner
 from arena_runtime.audit import AuditArchive
@@ -108,7 +109,10 @@ def run_fixture_season(root: Path) -> dict[str, object]:
     vendor = FixtureVendor(VENDOR)
     scheduled = rounds_for_day(calendar, SESSION)[0]
     assert scheduled.round_id == ROUND_ID
-    bars = bars_at_reference(vendor, ("AAA", "SPY"), scheduled.reference_minute)
+    symbols = ("AAA", "SPY")
+    bars = bars_at_reference(
+        vendor, symbols, last_complete_minute(scheduled.start)
+    )
     books = [
         cash_book(product_id, replica_id)
         for product_id, replica_ids in PRODUCTS
@@ -182,14 +186,20 @@ def run_fixture_season(root: Path) -> dict[str, object]:
         workspaces={request.replica_id: request.workspace for request in requests},
         staging_root=staging,
     )
-    snapshot = parse_snapshot(
+    workspace_snapshot = parse_snapshot(
         (requests[0].workspace / "state" / "market" / "snapshot.json").read_text(
             encoding="utf-8"
         )
     )
+    fill_bars = bars_at_reference(vendor, symbols, scheduled.reference_minute)
     evaluation = evaluate_candidates(
         collection=collection,
-        snapshot=snapshot,
+        snapshot=Snapshot(
+            schema_version=workspace_snapshot.schema_version,
+            clock=workspace_snapshot.clock,
+            bars=fill_bars,
+            portfolio=workspace_snapshot.portfolio,
+        ),
         books={
             request.replica_id: parse_portfolio(
                 (request.workspace / "state" / "portfolio.json").read_text(

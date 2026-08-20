@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final, Mapping, Protocol, Sequence, runtime_checkable
@@ -164,6 +164,17 @@ class FixtureVendor:
             return load_json_object(path.read_text(encoding="utf-8"))
         except SchemaError as exc:
             raise CommonDataUnavailable(name, exc.message) from exc
+
+
+def last_complete_minute(instant: datetime) -> datetime:
+    """Bar start of the last finished minute at or before ``instant``.
+
+    ``10:00:07`` and exact ``10:00:00`` both yield ``09:59:00``. The
+    in-progress minute is not complete.
+    """
+    aware = _require_aware(instant, name="instant")
+    floored = aware.replace(second=0, microsecond=0)
+    return floored - timedelta(minutes=1)
 
 
 def bars_at_reference(
