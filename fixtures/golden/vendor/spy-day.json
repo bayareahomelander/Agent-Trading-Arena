@@ -1,0 +1,16 @@
+{
+  "ticker": "SPY",
+  "status": "OK",
+  "adjusted": false,
+  "resultsCount": 1,
+  "results": [
+    {
+      "v": 800000,
+      "o": 110.00,
+      "c": 112.00,
+      "h": 113.00,
+      "l": 109.00,
+      "t": 1793577600000
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "ticker": "AAA",
+  "status": "OK",
+  "adjusted": false,
+  "resultsCount": 1,
+  "results": [
+    {
+      "v": 5000,
+      "o": 10.00,
+      "c": 10.50,
+      "h": 10.60,
+      "l": 9.90,
+      "t": 1793577600000
+    }
+  ]
+}
