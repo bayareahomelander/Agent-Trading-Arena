@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final, Mapping, Protocol, Sequence, runtime_checkable
@@ -34,7 +34,13 @@ from arena_kernel.schema._parse import (
 from arena_kernel.schema.clock import dump_clock
 from arena_kernel.schema.errors import FieldError, SchemaError
 from arena_kernel.schema.fills import FillsFile
-from arena_kernel.schema.market import Bar, Snapshot, bar_to_dict, parse_bar
+from arena_kernel.schema.market import (
+    Bar,
+    Snapshot,
+    bar_to_dict,
+    dump_history,
+    parse_bar,
+)
 from arena_kernel.schema.portfolio import Portfolio, dump_portfolio
 from arena_kernel.types import (
     EXCHANGE_TZ,
@@ -197,6 +203,55 @@ def require_fresh_snapshot(bars: Sequence[Bar], now: datetime) -> None:
         raise CommonDataUnavailable("bar_start", "stale")
 
 
+def history_from_vendor(
+    vendor: Vendor,
+    symbols: Sequence[str],
+    *,
+    session_open: datetime,
+    through: datetime,
+    daily_sessions: Sequence[date],
+) -> tuple[tuple[Bar, ...], tuple[Bar, ...]]:
+    """Intraday minutes and prior daily OHLCV. Empty either side is unavailable.
+
+    Daily bars are C5 records at 00:00 ET on each session date, fetched with
+    ``minute_bars``. Do not apply snapshot staleness here.
+    """
+    ordered = tuple(sorted(set(symbols)))
+    if not ordered:
+        raise CommonDataUnavailable("symbols", "missing")
+    start = _require_aware(session_open, name="session_open")
+    end = _require_aware(through, name="through")
+    if start > end:
+        raise ValueError("session_open must not be after through")
+    if not daily_sessions:
+        raise CommonDataUnavailable("daily", "missing")
+    intra_records = vendor.minute_bars(ordered, start, end)
+    intraday = tuple(
+        parse_bar(dict(item), path=str(item.get("symbol", "intraday")))
+        for item in intra_records
+    )
+    if not intraday:
+        raise CommonDataUnavailable("intraday", "missing")
+    daily: list[Bar] = []
+    for day in daily_sessions:
+        if type(day) is not date:
+            raise TypeError("daily_sessions must be datetime.date values")
+        instant = parse_et_timestamp(
+            format_et_timestamp(datetime.combine(day, time.min, tzinfo=EXCHANGE_TZ))
+        )
+        records = vendor.minute_bars(ordered, instant, instant)
+        if not records:
+            raise CommonDataUnavailable(day.isoformat(), "missing")
+        got = {str(item["symbol"]) for item in records}
+        for symbol in ordered:
+            if symbol not in got:
+                raise CommonDataUnavailable(symbol, "missing")
+        daily.extend(
+            parse_bar(dict(item), path=str(item["symbol"])) for item in records
+        )
+    return intraday, tuple(daily)
+
+
 def bars_at_reference(
     vendor: Vendor,
     symbols: Sequence[str],
@@ -251,12 +306,15 @@ def publish_round(
     rules_md: str = "",
     prompt_md: str = "",
     now: datetime | None = None,
+    intraday: Sequence[Bar] | None = None,
+    daily: Sequence[Bar] | None = None,
 ) -> None:
     """Write tape files, replica workspaces, and the raw vendor archive.
 
     Does not apply decisions. Does not author prompt text. Input books
     are not mutated. Pass ``now`` to enforce the 60-second snapshot rule;
-    omit it for historical fixture tapes.
+    omit it for historical fixture tapes. Pass both history sequences to
+    write identical ``intraday.json`` / ``daily.json``; omit both for D13.
     """
     books = _portfolio_map(portfolios)
     if not books:
@@ -264,6 +322,17 @@ def publish_round(
     bar_list = tuple(bars)
     if now is not None:
         require_fresh_snapshot(bar_list, now)
+    if (intraday is None) != (daily is None):
+        raise ValueError("intraday and daily must both be set or both omitted")
+    intraday_json: str | None = None
+    daily_json: str | None = None
+    if intraday is not None and daily is not None:
+        if not intraday:
+            raise CommonDataUnavailable("intraday", "missing")
+        if not daily:
+            raise CommonDataUnavailable("daily", "missing")
+        intraday_json = dump_history(intraday)
+        daily_json = dump_history(daily)
     clock = clock_for_round(
         scheduled,
         exchange_timestamp=scheduled.start
@@ -307,6 +376,8 @@ def publish_round(
             portfolio=book,
             fills=fill_map.get(replica_id, empty_fills),
             snapshot=snapshot,
+            intraday_json=intraday_json,
+            daily_json=daily_json,
         )
 
 

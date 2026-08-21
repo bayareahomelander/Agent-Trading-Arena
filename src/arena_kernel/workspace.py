@@ -23,6 +23,8 @@ CLOCK_FILE = "state/clock.json"
 PORTFOLIO_FILE = "state/portfolio.json"
 FILLS_FILE = "state/fills.json"
 SNAPSHOT_FILE = "state/market/snapshot.json"
+INTRADAY_FILE = "state/market/intraday.json"
+DAILY_FILE = "state/market/daily.json"
 OUTBOX_DECISION_FILE = "outbox/decision.json"
 
 _EMPTY_DIRS = (
@@ -43,8 +45,12 @@ def write_replica_workspace(
     portfolio: Portfolio,
     fills: FillsFile,
     snapshot: Snapshot,
+    intraday_json: str | None = None,
+    daily_json: str | None = None,
 ) -> Path:
     """Create one replica tree. Returns the resolved root."""
+    if (intraday_json is None) != (daily_json is None):
+        raise ValueError("intraday_json and daily_json must both be set or both omitted")
     base = Path(root)
     for relative in _EMPTY_DIRS:
         (base / relative).mkdir(parents=True, exist_ok=True)
@@ -58,4 +64,9 @@ def write_replica_workspace(
     (base / SNAPSHOT_FILE).write_text(
         dump_snapshot(snapshot), encoding="utf-8", newline="\n"
     )
+    if intraday_json is not None and daily_json is not None:
+        (base / INTRADAY_FILE).write_text(
+            intraday_json, encoding="utf-8", newline="\n"
+        )
+        (base / DAILY_FILE).write_text(daily_json, encoding="utf-8", newline="\n")
     return base.resolve()

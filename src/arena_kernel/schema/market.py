@@ -5,11 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from arena_kernel.schema._parse import (
+    SCHEMA_VERSION,
     as_mapping,
     join_path,
+    require_list,
     require_non_negative_decimal,
     require_object,
     require_positive_decimal,
@@ -145,6 +147,31 @@ def snapshot_to_dict(snapshot: Snapshot) -> dict[str, Any]:
 
 def dump_snapshot(snapshot: Snapshot) -> str:
     return dump_json(snapshot_to_dict(snapshot))
+
+
+def dump_history(bars: Sequence[Bar]) -> str:
+    """Dump common intraday or daily bars. Not a D5 Snapshot."""
+    return dump_json(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "bars": [bar_to_dict(bar) for bar in bars],
+        }
+    )
+
+
+def parse_history(data: Mapping[str, Any] | str | bytes) -> tuple[Bar, ...]:
+    """Parse sibling history JSON. Ignores Snapshot clock and portfolio."""
+    payload = as_mapping(data)
+    require_object(payload, required=("schema_version", "bars"))
+    require_schema_version(payload)
+    raw_bars = require_list(payload, "bars")
+    bars: list[Bar] = []
+    for index, item in enumerate(raw_bars):
+        path = join_path("bars", str(index))
+        if not isinstance(item, dict):
+            raise SchemaError(path, "expected an object")
+        bars.append(parse_bar(item, path=path))
+    return tuple(bars)
 
 
 def _read_eligible(payload: Mapping[str, Any], *, path: str) -> bool:
