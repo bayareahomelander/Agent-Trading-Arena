@@ -8,24 +8,29 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from arena_kernel.marketdata import FixtureVendor
-from arena_kernel.schema.errors import SchemaError
+from arena_kernel.marketdata import FixtureVendor, Vendor
+from arena_kernel.schema.errors import FieldError, SchemaError
 from arena_kernel.schema.market import parse_snapshot
 from arena_kernel.schema.portfolio import parse_portfolio
 from arena_kernel.types import parse_et_timestamp
+from arena_runtime.adapters.codex import CodexAdapter, CodexSessionStore
 from arena_runtime.adapters.fake import FakeRunner, FakeRunnerScript
+from arena_runtime.adapters.grok_build import (
+    GrokBuildAdapter,
+    GrokBuildSessionStore,
+)
 from arena_runtime.audit import AuditArchive
 from arena_runtime.disposition import decide_round_disposition
 from arena_runtime.orchestrator import (
     CLOSE_DEFERRED,
     CLOSE_MARKED,
     PreflightBarrierResult,
-    ReplicaDuty,
     collect_sealed_decisions,
     evaluate_candidates,
     mark_official_close,
@@ -33,13 +38,16 @@ from arena_runtime.orchestrator import (
     publish_candidates,
     run_decision_barrier,
 )
-from arena_runtime.operator_spec import parse_operator_spec
-from arena_runtime.registration import parse_runtime_registration
+from arena_runtime.isolation import prepare_replica_launch
+from arena_runtime.operator_spec import OperatorSpec, parse_operator_spec
 from arena_runtime.runner import (
     RUNNER_CONTRACT_VERSION,
     PreflightResult,
+    Runner,
     RunnerRequest,
+    RunnerResult,
 )
+from arena_runtime.vendors.aggregates import AggregatesVendor
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -82,30 +90,24 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def cmd_preflight(args: argparse.Namespace) -> int:
-    spec = _load_spec(args.spec)
+    spec, operator = _load_spec(args.spec)
     archive_root = _existing_dir(spec, "archive", create=True)
-    registrations = [
-        parse_runtime_registration(_read_json(path))
-        for path in _existing_paths(spec, "registrations")
-    ]
-    duties = tuple(
-        ReplicaDuty(
-            item["product_id"],
-            item["replica_id"],
-            item["status"],
-        )
-        for item in _require_list(spec, "duties")
-    )
+    registrations = operator.registrations
+    if not registrations:
+        raise CliError("registrations must list every product")
+    duties = operator.duties
+    if not duties:
+        raise CliError("duties must list every replica")
     requests = tuple(_parse_request(item) for item in _require_list(spec, "requests"))
     for request in requests:
         _require_existing_dir(request.workspace, name="workspace")
     archive = AuditArchive(archive_root)
-    runner = FakeRunner(_parse_scripts(spec), archive=archive)
+    runners = _construct_runners(spec, operator, requests, archive)
     result = preflight_round(
         registrations=registrations,
         duties=duties,
         requests=requests,
-        runners=_runners(spec, runner),
+        runners=runners,
         common_data_status=str(spec["common_data_status"]),
         archive=archive,
         decided_at=_aware(spec["decided_at"]),
@@ -116,7 +118,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
 
 
 def cmd_run_round(args: argparse.Namespace) -> int:
-    spec = _load_spec(args.spec)
+    spec, operator = _load_spec(args.spec)
     archive_root = _existing_dir(spec, "archive", create=True)
     books_root = _existing_dir(spec, "books_root", create=True)
     staging_root = _existing_dir(spec, "staging_root", create=True)
@@ -131,11 +133,11 @@ def cmd_run_round(args: argparse.Namespace) -> int:
         for replica_id, path in _existing_mapping(spec, "books").items()
     }
     archive = AuditArchive(archive_root)
-    runner = FakeRunner(_parse_scripts(spec), archive=archive)
+    runners = _construct_runners(spec, operator, requests, archive)
     barrier = run_decision_barrier(
         preflight=_parse_preflight(spec["preflight"]),
         requests=requests,
-        runners=_runners(spec, runner),
+        runners=runners,
         snapshot_checksum=str(spec["snapshot_checksum"]),
     )
     disposition = decide_round_disposition(
@@ -165,12 +167,11 @@ def cmd_run_round(args: argparse.Namespace) -> int:
 
 
 def cmd_close(args: argparse.Namespace) -> int:
-    spec = _load_spec(args.spec)
+    spec, operator = _load_spec(args.spec)
     books_root = _existing_dir(spec, "books_root", create=False)
-    vendor_root = _existing_dir(spec, "vendor", create=False)
     result = mark_official_close(
         books_root=books_root,
-        vendor=FixtureVendor(vendor_root),
+        vendor=_construct_vendor(operator),
         session_date=date.fromisoformat(str(spec["session_date"])),
         replica_ids=tuple(_require_list(spec, "replica_ids")),
         marked_at=_aware(spec["marked_at"]),
@@ -195,7 +196,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _load_spec(path: Path) -> dict[str, Any]:
+def _load_spec(path: Path) -> tuple[dict[str, Any], OperatorSpec]:
     resolved = Path(path)
     if not resolved.is_file():
         raise CliError(f"spec not found: {resolved}")
@@ -206,10 +207,10 @@ def _load_spec(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise CliError("spec must be a JSON object")
     try:
-        parse_operator_spec(payload)
+        operator = parse_operator_spec(payload)
     except SchemaError as exc:
         raise CliError(str(exc)) from exc
-    return payload
+    return payload, operator
 
 
 def _existing_file(spec: Mapping[str, Any], key: str) -> Path:
@@ -226,16 +227,6 @@ def _existing_dir(spec: Mapping[str, Any], key: str, *, create: bool) -> Path:
     if not path.is_dir():
         raise CliError(f"{key} not found: {path}")
     return path.resolve()
-
-
-def _existing_paths(spec: Mapping[str, Any], key: str) -> tuple[Path, ...]:
-    paths = []
-    for item in _require_list(spec, key):
-        path = Path(str(item))
-        if not path.is_file():
-            raise CliError(f"{key} not found: {path}")
-        paths.append(path)
-    return tuple(paths)
 
 
 def _existing_mapping(spec: Mapping[str, Any], key: str) -> dict[str, Path]:
@@ -262,10 +253,6 @@ def _require_list(spec: Mapping[str, Any], key: str) -> list[Any]:
     if not isinstance(value, list):
         raise CliError(f"{key} must be a list")
     return value
-
-
-def _read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _read_text(path: Path) -> str:
@@ -334,11 +321,178 @@ def _parse_scripts(spec: Mapping[str, Any]) -> tuple[FakeRunnerScript, ...]:
     return tuple(scripts)
 
 
-def _runners(spec: Mapping[str, Any], runner: FakeRunner) -> dict[str, FakeRunner]:
-    product_ids = spec.get("product_ids")
-    if not isinstance(product_ids, list) or not product_ids:
-        raise CliError("product_ids must list every product")
-    return {str(product_id): runner for product_id in product_ids}
+class _ReplicaRunner:
+    """Route one product's requests to its workspace-bound adapters."""
+
+    def __init__(self, runners: Mapping[str, Runner]) -> None:
+        self._runners = dict(runners)
+
+    def preflight(self, request: RunnerRequest) -> PreflightResult:
+        return self._for(request).preflight(request)
+
+    def run(self, request: RunnerRequest) -> RunnerResult:
+        return self._for(request).run(request)
+
+    def _for(self, request: RunnerRequest) -> Runner:
+        try:
+            return self._runners[request.replica_id]
+        except KeyError as exc:
+            raise CliError(
+                f"requests.{request.replica_id}: no constructed adapter"
+            ) from exc
+
+
+def _construct_runners(
+    spec: Mapping[str, Any],
+    operator: OperatorSpec,
+    requests: Sequence[RunnerRequest],
+    archive: AuditArchive,
+) -> dict[str, Runner]:
+    selected = dict(operator.adapters)
+    grouped: dict[str, list[RunnerRequest]] = {}
+    for request in requests:
+        grouped.setdefault(request.product_id, []).append(request)
+
+    runners: dict[str, Runner] = {}
+    fake_products = {
+        product_id
+        for product_id in grouped
+        if selected.get(product_id, "fake") == "fake"
+    }
+    if fake_products:
+        try:
+            fake = FakeRunner(_parse_scripts(spec), archive=archive)
+        except FieldError as exc:
+            raise CliError(str(exc)) from exc
+        runners.update({product_id: fake for product_id in fake_products})
+
+    registrations = {item.product_id: item for item in operator.registrations}
+    codex_store: CodexSessionStore | None = None
+    grok_store: GrokBuildSessionStore | None = None
+    for product_id, product_requests in grouped.items():
+        adapter_id = selected.get(product_id, "fake")
+        if adapter_id == "fake":
+            continue
+        registration = registrations.get(product_id)
+        if registration is None:
+            raise CliError(f"registrations.{product_id}: missing")
+        if operator.season_root is None:
+            raise CliError("season_root: required for subscription adapters")
+        per_replica: dict[str, Runner] = {}
+        try:
+            if adapter_id == "codex" and codex_store is None:
+                codex_store = CodexSessionStore(
+                    archive.root.parent / "runtime-state" / "codex-sessions"
+                )
+            if adapter_id == "grok_build" and grok_store is None:
+                grok_store = GrokBuildSessionStore(
+                    archive.root.parent / "runtime-state" / "grok-sessions"
+                )
+            for request in product_requests:
+                if request.replica_id in per_replica:
+                    raise CliError(f"requests.{request.replica_id}: duplicate")
+                launch = prepare_replica_launch(
+                    operator.season_root,
+                    request.replica_id,
+                    host_environment=os.environ,
+                )
+                if adapter_id == "codex":
+                    per_replica[request.replica_id] = CodexAdapter(
+                        registration,
+                        launch,
+                        archive=archive,
+                        session_store=codex_store,
+                    )
+                elif adapter_id == "grok_build":
+                    per_replica[request.replica_id] = GrokBuildAdapter(
+                        registration,
+                        launch,
+                        archive=archive,
+                        session_store=grok_store,
+                    )
+                else:  # E7 rejects this before construction.
+                    raise CliError(f"adapters.{product_id}: unknown adapter id")
+        except FieldError as exc:
+            raise CliError(str(exc)) from exc
+        runners[product_id] = (
+            next(iter(per_replica.values()))
+            if len(per_replica) == 1
+            else _ReplicaRunner(per_replica)
+        )
+    return runners
+
+
+def _construct_vendor(operator: OperatorSpec) -> Vendor:
+    options = dict(operator.vendor.options)
+    if operator.vendor.kind == "fixture":
+        root = options.get("root")
+        if not isinstance(root, Path):
+            raise CliError("vendor.root: required for fixture vendor")
+        return FixtureVendor(_require_existing_dir(root, name="vendor.root"))
+
+    base_url = options.get("base_url")
+    if not isinstance(base_url, str) or not base_url.strip():
+        raise CliError("vendor.base_url: required for aggregates vendor")
+    timeout = options.get("timeout", 10)
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or timeout <= 0
+    ):
+        raise CliError("vendor.timeout: must be a positive number")
+    if "api_key" in options:
+        raise CliError("vendor.api_key: use api_key_path or ARENA_VENDOR_API_KEY")
+    try:
+        return AggregatesVendor(
+            base_url=base_url,
+            symbols=_universe_symbols(operator.universe),
+            timeout=timeout,
+            api_key=_vendor_api_key(operator, options.get("api_key_path")),
+        )
+    except FieldError as exc:
+        raise CliError(str(exc)) from exc
+
+
+def _universe_symbols(value: tuple[str, ...] | Path | None) -> tuple[str, ...]:
+    raw: object = value
+    if isinstance(value, Path):
+        if not value.is_file():
+            raise CliError(f"universe not found: {value}")
+        try:
+            raw = json.loads(value.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise CliError(f"universe is not JSON: {exc.msg}") from exc
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise CliError("universe must list at least one symbol")
+    symbols: list[str] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, str) or not item or item.strip() != item:
+            raise CliError(f"universe.{index}: expected a symbol")
+        if item in symbols:
+            raise CliError(f"universe.{index}: duplicate symbol")
+        symbols.append(item)
+    return tuple(symbols)
+
+
+def _vendor_api_key(operator: OperatorSpec, value: object) -> str | None:
+    if value is None:
+        return os.environ.get("ARENA_VENDOR_API_KEY")
+    if not isinstance(value, Path):
+        raise CliError("vendor.api_key_path: expected an absolute path")
+    if not value.is_file():
+        raise CliError(f"vendor.api_key_path not found: {value}")
+    resolved = value.resolve()
+    workspaces = tuple(
+        path.resolve(strict=False) for _replica, path in operator.workspaces
+    )
+    if operator.season_root is not None:
+        workspaces += ((operator.season_root / "replicas").resolve(strict=False),)
+    if any(resolved == root or resolved.is_relative_to(root) for root in workspaces):
+        raise CliError("vendor.api_key_path: must be outside replica workspaces")
+    key = value.read_text(encoding="utf-8").strip()
+    if not key:
+        raise CliError("vendor.api_key_path: file is empty")
+    return key
 
 
 def _parse_preflight(item: object) -> PreflightBarrierResult:
