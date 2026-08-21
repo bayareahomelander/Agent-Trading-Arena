@@ -9,7 +9,6 @@ from pathlib import Path
 
 from arena_kernel.workspace import SNAPSHOT_FILE
 from arena_runtime.adapters.fake import FakeRunner
-from arena_runtime.audit import AuditArchive
 from arena_runtime.orchestrator import (
     published_snapshot_checksum,
     run_decision_barrier,

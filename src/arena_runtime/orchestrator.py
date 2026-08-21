@@ -12,7 +12,6 @@ R24 archives the four non-agent B7 baselines from the same tape inputs.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass

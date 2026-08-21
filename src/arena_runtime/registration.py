@@ -14,7 +14,6 @@ from urllib.parse import urlsplit
 
 from arena_kernel.schema._dump import dump_json
 from arena_kernel.schema._parse import (
-    SCHEMA_VERSION,
     as_mapping,
     join_path,
     require_list,

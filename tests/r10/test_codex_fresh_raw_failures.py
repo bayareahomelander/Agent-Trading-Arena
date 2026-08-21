@@ -8,7 +8,7 @@ import pytest
 
 from arena_runtime.adapters.codex import CodexExecutionError, CodexSessionError
 
-from .conftest import EXACT_DECISION, make_case
+from .conftest import make_case
 
 
 def test_timeout_uses_shared_deadline_without_mapping_provider_meaning(

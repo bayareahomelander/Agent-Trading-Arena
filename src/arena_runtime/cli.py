@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from arena_kernel.marketdata import FixtureVendor
+from arena_kernel.schema.errors import SchemaError
 from arena_kernel.schema.market import parse_snapshot
 from arena_kernel.schema.portfolio import parse_portfolio
 from arena_kernel.types import parse_et_timestamp
@@ -32,6 +33,7 @@ from arena_runtime.orchestrator import (
     publish_candidates,
     run_decision_barrier,
 )
+from arena_runtime.operator_spec import parse_operator_spec
 from arena_runtime.registration import parse_runtime_registration
 from arena_runtime.runner import (
     RUNNER_CONTRACT_VERSION,
@@ -203,6 +205,10 @@ def _load_spec(path: Path) -> dict[str, Any]:
         raise CliError(f"spec is not JSON: {exc.msg}") from exc
     if not isinstance(payload, dict):
         raise CliError("spec must be a JSON object")
+    try:
+        parse_operator_spec(payload)
+    except SchemaError as exc:
+        raise CliError(str(exc)) from exc
     return payload
 
 

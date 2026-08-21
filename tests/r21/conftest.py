@@ -12,7 +12,7 @@ from arena_kernel.schema.market import Bar, Snapshot
 from arena_kernel.schema.portfolio import Portfolio
 from arena_kernel.types import EXCHANGE_TIMEZONE_NAME, parse_et_timestamp
 from arena_runtime.orchestrator import evaluate_candidates
-from tests.r20.conftest import ROUND_ID, collect, make_result
+from tests.r20.conftest import ROUND_ID, collect
 
 START = parse_et_timestamp("2026-08-17T10:00:00-04:00")
 DEADLINE = parse_et_timestamp("2026-08-17T10:15:00-04:00")
