@@ -166,6 +166,9 @@ class FixtureVendor:
             raise CommonDataUnavailable(name, exc.message) from exc
 
 
+_SNAPSHOT_STALE_AFTER: Final[timedelta] = timedelta(seconds=60)
+
+
 def last_complete_minute(instant: datetime) -> datetime:
     """Bar start of the last finished minute at or before ``instant``.
 
@@ -175,6 +178,23 @@ def last_complete_minute(instant: datetime) -> datetime:
     aware = _require_aware(instant, name="instant")
     floored = aware.replace(second=0, microsecond=0)
     return floored - timedelta(minutes=1)
+
+
+def require_fresh_snapshot(bars: Sequence[Bar], now: datetime) -> None:
+    """Reject a round-start snapshot more than 60 seconds behind ``now``.
+
+    Fill-time missing minutes stay C6 ineligible; this check is publish-time
+    only. Inject ``now`` — do not read the wall clock.
+    """
+    instant = _require_aware(now, name="now")
+    starts = tuple(
+        bar.bar_start.astimezone(EXCHANGE_TZ) for bar in bars if bar.eligible
+    )
+    if not starts:
+        raise CommonDataUnavailable("bars", "no eligible bar")
+    latest = max(starts)
+    if instant - latest > _SNAPSHOT_STALE_AFTER:
+        raise CommonDataUnavailable("bar_start", "stale")
 
 
 def bars_at_reference(
@@ -230,22 +250,26 @@ def publish_round(
     exchange_timestamp: datetime | None = None,
     rules_md: str = "",
     prompt_md: str = "",
+    now: datetime | None = None,
 ) -> None:
     """Write tape files, replica workspaces, and the raw vendor archive.
 
     Does not apply decisions. Does not author prompt text. Input books
-    are not mutated.
+    are not mutated. Pass ``now`` to enforce the 60-second snapshot rule;
+    omit it for historical fixture tapes.
     """
     books = _portfolio_map(portfolios)
     if not books:
         raise ValueError("portfolios must not be empty")
+    bar_list = tuple(bars)
+    if now is not None:
+        require_fresh_snapshot(bar_list, now)
     clock = clock_for_round(
         scheduled,
         exchange_timestamp=scheduled.start
         if exchange_timestamp is None
         else exchange_timestamp,
     )
-    bar_list = tuple(bars)
     empty_fills = FillsFile(schema_version=SCHEMA_VERSION, fills=())
     fill_map = fills if fills is not None else {}
     base = Path(root)
