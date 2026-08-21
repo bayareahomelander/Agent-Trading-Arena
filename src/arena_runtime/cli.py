@@ -1,7 +1,7 @@
 """Manual operator entry point.
 
-R25 dispatches to existing runtime APIs. It does not interpret decisions,
-choose disposition policy, or wait on a wall clock.
+R25 dispatches to existing runtime APIs. E9 optionally waits for one round
+start. This module does not interpret decisions or choose disposition policy.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from arena_kernel.calendar import ScheduledRound, parse_calendar, rounds_for_day
 from arena_kernel.marketdata import FixtureVendor, Vendor
 from arena_kernel.schema.errors import FieldError, SchemaError
 from arena_kernel.schema.market import parse_snapshot
@@ -48,6 +49,7 @@ from arena_runtime.runner import (
     RunnerResult,
 )
 from arena_runtime.vendors.aggregates import AggregatesVendor
+from arena_runtime.wait import wait_until
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -119,6 +121,9 @@ def cmd_preflight(args: argparse.Namespace) -> int:
 
 def cmd_run_round(args: argparse.Namespace) -> int:
     spec, operator = _load_spec(args.spec)
+    should_wait = spec.get("wait", True)
+    if not isinstance(should_wait, bool):
+        raise CliError("wait must be a boolean")
     archive_root = _existing_dir(spec, "archive", create=True)
     books_root = _existing_dir(spec, "books_root", create=True)
     staging_root = _existing_dir(spec, "staging_root", create=True)
@@ -134,6 +139,8 @@ def cmd_run_round(args: argparse.Namespace) -> int:
     }
     archive = AuditArchive(archive_root)
     runners = _construct_runners(spec, operator, requests, archive)
+    if should_wait:
+        wait_until(_scheduled_round(operator).start)
     barrier = run_decision_barrier(
         preflight=_parse_preflight(spec["preflight"]),
         requests=requests,
@@ -211,6 +218,33 @@ def _load_spec(path: Path) -> tuple[dict[str, Any], OperatorSpec]:
     except SchemaError as exc:
         raise CliError(str(exc)) from exc
     return payload, operator
+
+
+def _scheduled_round(operator: OperatorSpec) -> ScheduledRound:
+    if operator.calendar is None:
+        raise CliError("calendar: required when wait is enabled")
+    if operator.round_id is None:
+        raise CliError("round_id: required when wait is enabled")
+    if not operator.calendar.is_file():
+        raise CliError(f"calendar not found: {operator.calendar}")
+    try:
+        calendar = parse_calendar(operator.calendar.read_text(encoding="utf-8"))
+    except SchemaError as exc:
+        raise CliError(str(exc)) from exc
+    scheduled = next(
+        (
+            item
+            for item in rounds_for_day(
+                calendar,
+                date.fromisoformat(operator.round_id[:10]),
+            )
+            if item.round_id == operator.round_id
+        ),
+        None,
+    )
+    if scheduled is None:
+        raise CliError("round_id: not scheduled by calendar")
+    return scheduled
 
 
 def _existing_file(spec: Mapping[str, Any], key: str) -> Path:

@@ -120,6 +120,7 @@ def test_legacy_fake_run_round_still_prints_committed(
             },
             "fake_scripts": [_script()],
             "product_ids": ["product-a"],
+            "wait": False,
             "preflight": {
                 "round_id": _ROUND_ID,
                 "ready": True,
