@@ -15,11 +15,24 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from arena_kernel.calendar import ScheduledRound, parse_calendar, rounds_for_day
-from arena_kernel.marketdata import FixtureVendor, Vendor
+from arena_kernel.marketdata import (
+    TAPE_ROUNDS_DIR,
+    CommonDataUnavailable,
+    FixtureVendor,
+    Vendor,
+    bars_at_reference,
+    history_from_vendor,
+    last_complete_minute,
+    publish_round,
+    require_fresh_snapshot,
+)
+from arena_kernel.schema._dump import dump_json
 from arena_kernel.schema.errors import FieldError, SchemaError
-from arena_kernel.schema.market import parse_snapshot
+from arena_kernel.schema.fills import parse_fills
+from arena_kernel.schema.market import Bar, Snapshot, bar_to_dict, parse_snapshot
 from arena_kernel.schema.portfolio import parse_portfolio
 from arena_kernel.types import parse_et_timestamp
+from arena_kernel.workspace import FILLS_FILE, PROMPT_FILE, RULES_FILE, SNAPSHOT_FILE
 from arena_runtime.adapters.codex import CodexAdapter, CodexSessionStore
 from arena_runtime.adapters.fake import FakeRunner, FakeRunnerScript
 from arena_runtime.adapters.grok_build import (
@@ -27,7 +40,11 @@ from arena_runtime.adapters.grok_build import (
     GrokBuildSessionStore,
 )
 from arena_runtime.audit import AuditArchive
-from arena_runtime.disposition import decide_round_disposition
+from arena_runtime.disposition import (
+    COMMON_DATA_AVAILABLE,
+    COMMON_DATA_UNAVAILABLE,
+    decide_round_disposition,
+)
 from arena_runtime.orchestrator import (
     CLOSE_DEFERRED,
     CLOSE_MARKED,
@@ -37,6 +54,7 @@ from arena_runtime.orchestrator import (
     mark_official_close,
     preflight_round,
     publish_candidates,
+    published_snapshot_checksum,
     run_decision_barrier,
 )
 from arena_runtime.isolation import prepare_replica_launch
@@ -124,10 +142,12 @@ def cmd_run_round(args: argparse.Namespace) -> int:
     should_wait = spec.get("wait", True)
     if not isinstance(should_wait, bool):
         raise CliError("wait must be a boolean")
+    live_round = spec.get("live_round", False)
+    if not isinstance(live_round, bool):
+        raise CliError("live_round must be a boolean")
     archive_root = _existing_dir(spec, "archive", create=True)
     books_root = _existing_dir(spec, "books_root", create=True)
     staging_root = _existing_dir(spec, "staging_root", create=True)
-    snapshot = parse_snapshot(_read_text(_existing_file(spec, "snapshot")))
     requests = tuple(_parse_request(item) for item in _require_list(spec, "requests"))
     workspaces = {
         request.replica_id: _require_existing_dir(request.workspace, name="workspace")
@@ -139,17 +159,111 @@ def cmd_run_round(args: argparse.Namespace) -> int:
     }
     archive = AuditArchive(archive_root)
     runners = _construct_runners(spec, operator, requests, archive)
-    if should_wait:
-        wait_until(_scheduled_round(operator).start)
+    scheduled = _scheduled_round(operator) if should_wait or live_round else None
+    vendor: Vendor | None = None
+    if live_round:
+        if scheduled is None:  # pragma: no cover - live_round resolves it above
+            raise CliError("round_id: required for live round")
+        vendor = _construct_vendor(operator)
+        if should_wait:
+            wait_until(scheduled.start)
+        live_data = None
+        common_data_status = COMMON_DATA_AVAILABLE
+        snapshot_now = (
+            _aware(spec["now"]) if "now" in spec else datetime.now().astimezone()
+        )
+        try:
+            symbols = _universe_symbols(operator.universe)
+            start_minute = last_complete_minute(scheduled.start)
+            start_bars = bars_at_reference(vendor, symbols, start_minute)
+            require_fresh_snapshot(start_bars, snapshot_now)
+            intraday, daily = history_from_vendor(
+                vendor,
+                symbols,
+                session_open=_aware(spec["session_open"]),
+                through=start_minute,
+                daily_sessions=_session_dates(spec),
+            )
+            live_data = (symbols, start_bars, intraday, daily)
+        except CommonDataUnavailable:
+            common_data_status = COMMON_DATA_UNAVAILABLE
+        preflight = preflight_round(
+            registrations=operator.registrations,
+            duties=operator.duties,
+            requests=requests,
+            runners=runners,
+            common_data_status=common_data_status,
+            archive=archive,
+            decided_at=_aware(spec["decided_at"]),
+        )
+        if not preflight.ready:
+            print("paused")
+            return EXIT_PAUSED
+        if live_data is None:  # pragma: no cover - unavailable data pauses above
+            raise CliError("common market data unavailable")
+        symbols, start_bars, intraday, daily = live_data
+        season_root = _live_season_root(operator, workspaces)
+        try:
+            publish_round(
+                season_root,
+                scheduled=scheduled,
+                bars=start_bars,
+                portfolios=tuple(books.values()),
+                fills={
+                    replica_id: parse_fills(_read_text(workspace / FILLS_FILE))
+                    for replica_id, workspace in workspaces.items()
+                },
+                raw_vendor_bytes=_raw_vendor_bytes(vendor),
+                rules_md=_common_workspace_text(workspaces, RULES_FILE),
+                prompt_md=_common_workspace_text(workspaces, PROMPT_FILE),
+                now=snapshot_now if "now" in spec else datetime.now().astimezone(),
+                intraday=intraday,
+                daily=daily,
+            )
+        except CommonDataUnavailable:
+            print("paused")
+            return EXIT_PAUSED
+        snapshot_checksum = published_snapshot_checksum(
+            workspaces[requests[0].replica_id]
+        )
+    else:
+        snapshot = parse_snapshot(_read_text(_existing_file(spec, "snapshot")))
+        preflight = _parse_preflight(spec["preflight"])
+        snapshot_checksum = str(spec["snapshot_checksum"])
+        common_data_status = str(spec["common_data_status"])
+        if should_wait:
+            if scheduled is None:  # pragma: no cover - should_wait resolves it above
+                raise CliError("round_id: required when wait is enabled")
+            wait_until(scheduled.start)
     barrier = run_decision_barrier(
-        preflight=_parse_preflight(spec["preflight"]),
+        preflight=preflight,
         requests=requests,
         runners=runners,
-        snapshot_checksum=str(spec["snapshot_checksum"]),
+        snapshot_checksum=snapshot_checksum,
     )
+    if live_round:
+        if vendor is None or scheduled is None:  # pragma: no cover - set above
+            raise CliError("live round is missing its vendor or schedule")
+        try:
+            fill_bars = bars_at_reference(vendor, symbols, scheduled.reference_minute)
+        except CommonDataUnavailable:
+            fill_bars = ()
+            common_data_status = COMMON_DATA_UNAVAILABLE
+        if not any(bar.eligible for bar in fill_bars):
+            common_data_status = COMMON_DATA_UNAVAILABLE
+        _archive_fill_bars(operator, scheduled, fill_bars)
+        workspace_snapshot = parse_snapshot(
+            _read_text(workspaces[requests[0].replica_id] / SNAPSHOT_FILE)
+        )
+        snapshot = Snapshot(
+            schema_version=workspace_snapshot.schema_version,
+            clock=workspace_snapshot.clock,
+            bars=fill_bars,
+            portfolio=workspace_snapshot.portfolio,
+        )
     disposition = decide_round_disposition(
         barrier.results,
-        str(spec["common_data_status"]),
+        common_data_status,
     )
     collection = collect_sealed_decisions(
         barrier=barrier,
@@ -245,6 +359,67 @@ def _scheduled_round(operator: OperatorSpec) -> ScheduledRound:
     if scheduled is None:
         raise CliError("round_id: not scheduled by calendar")
     return scheduled
+
+
+def _session_dates(spec: Mapping[str, Any]) -> tuple[date, ...]:
+    dates: list[date] = []
+    for index, value in enumerate(_require_list(spec, "daily_sessions")):
+        try:
+            day = date.fromisoformat(str(value))
+        except ValueError as exc:
+            raise CliError(f"daily_sessions.{index}: expected YYYY-MM-DD") from exc
+        if day in dates:
+            raise CliError(f"daily_sessions.{index}: duplicate date")
+        dates.append(day)
+    return tuple(dates)
+
+
+def _live_season_root(
+    operator: OperatorSpec,
+    workspaces: Mapping[str, Path],
+) -> Path:
+    if operator.season_root is None:
+        raise CliError("season_root: required for live round")
+    root = operator.season_root.resolve(strict=False)
+    for replica_id, workspace in workspaces.items():
+        expected = (root / "replicas" / replica_id).resolve(strict=False)
+        if workspace != expected:
+            raise CliError(f"workspaces.{replica_id}: must be under season_root")
+    return root
+
+
+def _common_workspace_text(workspaces: Mapping[str, Path], relative: str) -> str:
+    texts: set[str] = set()
+    for replica_id, workspace in workspaces.items():
+        path = workspace / relative
+        if not path.is_file():
+            raise CliError(f"workspaces.{replica_id}.{relative}: missing")
+        texts.add(_read_text(path))
+    if len(texts) != 1:
+        raise CliError(f"workspaces.{relative}: must be byte-identical")
+    return next(iter(texts))
+
+
+def _raw_vendor_bytes(vendor: Vendor) -> bytes:
+    archive = getattr(vendor, "raw_archive", ())
+    return b"".join(item[1] for item in archive)
+
+
+def _archive_fill_bars(
+    operator: OperatorSpec,
+    scheduled: ScheduledRound,
+    bars: Sequence[Bar],
+) -> None:
+    if operator.season_root is None:
+        raise CliError("season_root: required for live round")
+    path = (
+        operator.season_root / TAPE_ROUNDS_DIR / scheduled.round_id / "fill-bars.json"
+    )
+    path.write_text(
+        dump_json({"bars": [bar_to_dict(bar) for bar in bars]}),
+        encoding="utf-8",
+        newline="\n",
+    )
 
 
 def _existing_file(spec: Mapping[str, Any], key: str) -> Path:
